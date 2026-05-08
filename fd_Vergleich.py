@@ -255,6 +255,12 @@ def sorted_day_text(days: Set[int]) -> str:
     return ", ".join(f"{d} {DAY_NAMES[d]}" for d in sorted(days))
 
 
+def _tour_field_has_allowed_direct(value) -> bool:
+    """Prüft ob mindestens eine Tournummer im Feld zu den freigegebenen gehört."""
+    nums = set(re.findall(r"\d+", value_to_clean_text(value)))
+    return bool(nums & DIRECT_ALLOWED_TOURS)
+
+
 def apply_final_scope_filter(tour_df: pd.DataFrame) -> pd.DataFrame:
     """Letzte Sicherheitsprüfung für den Prüfbereich.
 
@@ -271,7 +277,11 @@ def apply_final_scope_filter(tour_df: pd.DataFrame) -> pd.DataFrame:
         work["Tournummer Tour"] = work["Tournummer Tour"].map(value_to_clean_text)
 
     direct_mask = work["Bereich"].eq("Direkt")
-    direct_ok = direct_mask & work["Tournummer Tour"].isin(DIRECT_ALLOWED_TOURS)
+    # Harter Check: exakter Match ODER mindestens eine Nummer im Feld erlaubt
+    direct_ok = direct_mask & (
+        work["Tournummer Tour"].isin(DIRECT_ALLOWED_TOURS)
+        | work["Tournummer Tour"].apply(_tour_field_has_allowed_direct)
+    )
     other_ok = work["Bereich"].isin({"NMS", "Malchow"})
 
     filtered = work[other_ok | direct_ok].copy()
@@ -627,6 +637,11 @@ def build_direct_tourkunden(tour_df: pd.DataFrame) -> pd.DataFrame:
     direct = tour_df[tour_df["Bereich"] == "Direkt"].copy()
     if direct.empty:
         return pd.DataFrame(columns=tour_scope_columns())
+    # Harter Sicherheitsfilter: nur die sechs freigegebenen Touren
+    direct["_tn_clean"] = direct["Tournummer Tour"].map(value_to_clean_text)
+    direct = direct[direct["_tn_clean"].isin(DIRECT_ALLOWED_TOURS)].drop(columns=["_tn_clean"])
+    if direct.empty:
+        return pd.DataFrame(columns=tour_scope_columns())
     direct["_sap_sort"] = pd.to_numeric(direct["SAP Nummer"], errors="coerce").fillna(9_999_999_999)
     direct["_tag_sort"] = direct["Liefertag Nr"]
     direct = direct.sort_values(["_sap_sort", "_tag_sort", "Tournummer Tour"]).drop(columns=["_sap_sort", "_tag_sort"])
@@ -672,51 +687,23 @@ def _add_count_column(df: pd.DataFrame) -> pd.DataFrame:
     return out[cols]
 
 
-def build_excel(
-    all_diff: pd.DataFrame,
-    missing_sap: pd.DataFrame,
-    missing_tour: pd.DataFrame,
-    tour_scope: pd.DataFrame,
-    direct_tourkunden: pd.DataFrame,
-    direct_unique: pd.DataFrame,
-) -> bytes:
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        sheets = [
-            ("Alle Unterschiede", _add_count_column(all_diff)),
-            ("Fehlt in SAP", _add_count_column(missing_sap)),
-            ("Fehlt in Tour", _add_count_column(missing_tour)),
-            ("Geprüfter Tourbereich", tour_scope[tour_scope_columns()] if not tour_scope.empty else pd.DataFrame(columns=tour_scope_columns())),
-            ("Direkt Tourkunden", direct_tourkunden),
-            ("Direkt Kunden", direct_unique),
-        ]
-        for sheet_name, df in sheets:
-            df.to_excel(writer, index=False, sheet_name=sheet_name, na_rep="")
-            _format_sheet(writer, sheet_name, df)
-
-        wb = writer.book
-        for ws in wb.worksheets:
-            ws.sheet_state = "visible"
-        if wb.worksheets:
-            wb.active = 0
-    return output.getvalue()
 
 
 _RIGHT_ALIGN_COLS = {"SAP Nummer", "CSB", "PLZ", "Anzahl LT"}
-_CENTER_ALIGN_COLS = {"Anzahl LT", "Liefertag", "Tournummer Tour", "Quelle"}
+_CENTER_ALIGN_COLS = {"Anzahl LT", "Liefertag", "Tournummer Tour", "Quelle", "Bereich", "Liefertag Nr"}
 _COL_WIDTH_HINTS = {
-    "Prüfung": (24, 34),
+    "Prüfung": (26, 36),
     "Bereich": (10, 14),
     "Blatt Tourenplanung": (18, 28),
     "CSB": (10, 12),
-    "SAP Nummer": (10, 12),
+    "SAP Nummer": (12, 14),
     "Anzahl LT": (9, 11),
     "Name": (24, 44),
     "Straße": (20, 34),
     "PLZ": (8, 10),
     "Ort": (18, 30),
     "Liefertag": (16, 18),
-    "Tournummer Tour": (14, 20),
+    "Tournummer Tour": (16, 20),
     "LT SAP": (24, 48),
     "LT Tourenplanung": (24, 48),
     "Hinweis": (30, 58),
@@ -724,14 +711,34 @@ _COL_WIDTH_HINTS = {
     "Gefundene Touren": (18, 28),
 }
 
+# ---- Farben je Bereich ----
+_BEREICH_FILL = {
+    "NMS":     PatternFill(start_color="FFDCE6F1", end_color="FFDCE6F1", fill_type="solid"),   # blau-hell
+    "Malchow": PatternFill(start_color="FFE2EFDA", end_color="FFE2EFDA", fill_type="solid"),   # grün-hell
+    "Direkt":  PatternFill(start_color="FFFCE4D6", end_color="FFFCE4D6", fill_type="solid"),   # orange-hell
+}
+_BEREICH_FILL_ZEBRA = {
+    "NMS":     PatternFill(start_color="FFC5D9F1", end_color="FFC5D9F1", fill_type="solid"),   # blau
+    "Malchow": PatternFill(start_color="FFC6EFCE", end_color="FFC6EFCE", fill_type="solid"),   # grün
+    "Direkt":  PatternFill(start_color="FFF8CBAD", end_color="FFF8CBAD", fill_type="solid"),   # orange
+}
+_PRUEFUNG_FILL = {
+    "Fehlt in SAP / zu viel in Tour": PatternFill(start_color="FFFFF2CC", end_color="FFFFF2CC", fill_type="solid"),  # gelb
+    "Fehlt in Tour / zu viel in SAP": PatternFill(start_color="FFFCE4EC", end_color="FFFCE4EC", fill_type="solid"),  # rosa
+}
+_PRUEFUNG_FONT = {
+    "Fehlt in SAP / zu viel in Tour": Font(name="Calibri", size=10, bold=True, color="FF7F6000"),
+    "Fehlt in Tour / zu viel in SAP": Font(name="Calibri", size=10, bold=True, color="FFC00000"),
+}
+_DEFAULT_ZEBRA = PatternFill(start_color="FFF2F2F2", end_color="FFF2F2F2", fill_type="solid")
 
-def _format_sheet(writer, sheet_name: str, df: pd.DataFrame) -> None:
+
+def _format_sheet(writer, sheet_name: str, df: pd.DataFrame, use_bereich_colors: bool = True) -> None:
     ws = writer.sheets[sheet_name]
     n_rows = len(df)
     n_cols = len(df.columns)
 
     header_fill = PatternFill(start_color="FF305496", end_color="FF305496", fill_type="solid")
-    zebra_fill = PatternFill(start_color="FFE8EFF7", end_color="FFE8EFF7", fill_type="solid")
     thin = Side(style="thin", color="FFCBD5E0")
     medium = Side(style="medium", color="FF305496")
     border_thin = Border(left=thin, right=thin, top=thin, bottom=thin)
@@ -744,21 +751,33 @@ def _format_sheet(writer, sheet_name: str, df: pd.DataFrame) -> None:
 
     columns = list(df.columns)
 
+    # --- Kopfzeile ---
     for col_idx in range(1, n_cols + 1):
         cell = ws.cell(row=1, column=col_idx)
         cell.fill = header_fill
         cell.font = header_font
-        cell.alignment = align_left
+        cell.alignment = align_center
         cell.border = border_thin
-    ws.row_dimensions[1].height = 24
+    ws.row_dimensions[1].height = 26
 
-    bereich_values = df["Bereich"].tolist() if "Bereich" in df.columns else []
+    # --- Datenzeilen ---
+    bereich_values = df["Bereich"].tolist() if ("Bereich" in df.columns and use_bereich_colors) else []
+    pruefung_values = df["Prüfung"].tolist() if "Prüfung" in df.columns else []
 
     for row_offset in range(n_rows):
         excel_row = row_offset + 2
         is_zebra = (row_offset % 2) == 1
+        bereich = bereich_values[row_offset] if bereich_values else ""
+        pruefung = pruefung_values[row_offset] if pruefung_values else ""
         new_group = bool(bereich_values) and row_offset > 0 and bereich_values[row_offset] != bereich_values[row_offset - 1]
-        ws.row_dimensions[excel_row].height = 19
+        ws.row_dimensions[excel_row].height = 20
+
+        # Zeile einfärben nach Bereich
+        if use_bereich_colors and bereich in _BEREICH_FILL:
+            row_fill = _BEREICH_FILL_ZEBRA[bereich] if is_zebra else _BEREICH_FILL[bereich]
+        else:
+            row_fill = _DEFAULT_ZEBRA if is_zebra else None
+
         for col_idx, col_name in enumerate(columns, start=1):
             cell = ws.cell(row=excel_row, column=col_idx)
             cell.font = body_font
@@ -768,11 +787,20 @@ def _format_sheet(writer, sheet_name: str, df: pd.DataFrame) -> None:
                 cell.alignment = align_right
             else:
                 cell.alignment = align_left
-            if is_zebra:
-                cell.fill = zebra_fill
+            if row_fill:
+                cell.fill = row_fill
             top_side = medium if new_group else thin
             cell.border = Border(left=thin, right=thin, top=top_side, bottom=thin)
 
+        # Prüfung-Spalte extra hervorheben
+        if pruefung and "Prüfung" in columns:
+            p_col = columns.index("Prüfung") + 1
+            p_cell = ws.cell(row=excel_row, column=p_col)
+            if pruefung in _PRUEFUNG_FILL:
+                p_cell.fill = _PRUEFUNG_FILL[pruefung]
+                p_cell.font = _PRUEFUNG_FONT[pruefung]
+
+    # --- Spaltenbreiten ---
     for col_idx, col_name in enumerate(columns, start=1):
         sample = df[col_name].astype(str).head(300).tolist() if n_rows else []
         max_len = max([len(str(col_name))] + [len(v) for v in sample] + [8])
@@ -792,6 +820,130 @@ def _format_sheet(writer, sheet_name: str, df: pd.DataFrame) -> None:
     except Exception:
         pass
 
+
+def _write_summary_sheet(writer, counts: Dict[str, int], selected_sheets: Dict[str, str]) -> None:
+    """Schreibt ein Zusammenfassungs-Blatt als erstes Blatt."""
+    ws = writer.book.create_sheet("Zusammenfassung", 0)
+    writer.sheets["Zusammenfassung"] = ws
+
+    title_font = Font(name="Calibri", size=16, bold=True, color="FF305496")
+    label_font = Font(name="Calibri", size=11, bold=True)
+    value_font = Font(name="Calibri", size=11)
+    small_font = Font(name="Calibri", size=9, color="FF666666")
+    header_fill = PatternFill(start_color="FF305496", end_color="FF305496", fill_type="solid")
+    header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFFFF")
+
+    ws.column_dimensions["A"].width = 4
+    ws.column_dimensions["B"].width = 36
+    ws.column_dimensions["C"].width = 18
+
+    ws.cell(row=2, column=2, value="SAP gegen Tourenplanung").font = title_font
+    ws.cell(row=3, column=2, value="Nur geprüfter Tourbereich: NMS, Malchow, Direkt (6 Touren)").font = small_font
+
+    row = 5
+    ws.cell(row=row, column=2, value="Kennzahl").font = header_font
+    ws.cell(row=row, column=2).fill = header_fill
+    ws.cell(row=row, column=3, value="Wert").font = header_font
+    ws.cell(row=row, column=3).fill = header_fill
+    ws.cell(row=row, column=3).alignment = Alignment(horizontal="right")
+
+    items = [
+        ("Geprüfte Tour-Zeilen", counts.get("tour_scope", 0)),
+        ("  davon NMS", counts.get("nms", 0)),
+        ("  davon Malchow", counts.get("malchow", 0)),
+        ("  davon Direkt (Tourkunden)", counts.get("direkt", 0)),
+        ("", ""),
+        ("Fehlt in SAP / zu viel in Tour", counts.get("missing_sap", 0)),
+        ("Fehlt in Tour / zu viel in SAP", counts.get("missing_tour", 0)),
+        ("Unterschiede gesamt", counts.get("all_diff", 0)),
+        ("", ""),
+        ("Direkt: einmalige Kunden", counts.get("direct_unique", 0)),
+    ]
+
+    for i, (label, val) in enumerate(items, start=1):
+        r = row + i
+        ws.cell(row=r, column=2, value=label).font = label_font if label and not label.startswith(" ") else value_font
+        if val != "":
+            c = ws.cell(row=r, column=3, value=val)
+            c.font = value_font
+            c.alignment = Alignment(horizontal="right")
+
+    # Geprüfte Blätter
+    r = row + len(items) + 2
+    ws.cell(row=r, column=2, value="Geprüfte Blätter").font = header_font
+    ws.cell(row=r, column=2).fill = header_fill
+    ws.cell(row=r, column=3, value="Blattname").font = header_font
+    ws.cell(row=r, column=3).fill = header_fill
+    for i, (bereich, blatt) in enumerate(selected_sheets.items(), start=1):
+        ws.cell(row=r + i, column=2, value=bereich).font = label_font
+        ws.cell(row=r + i, column=3, value=blatt).font = value_font
+
+    # Direkt-Touren Info
+    r2 = r + len(selected_sheets) + 2
+    ws.cell(row=r2, column=2, value="Geprüfte Direkt-Touren").font = header_font
+    ws.cell(row=r2, column=2).fill = header_fill
+    ws.cell(row=r2, column=3, value="Wochentag").font = header_font
+    ws.cell(row=r2, column=3).fill = header_fill
+    for i, (day, tour) in enumerate(sorted(DIRECT_TOUR_BY_DAY.items()), start=1):
+        ws.cell(row=r2 + i, column=2, value=tour).font = value_font
+        ws.cell(row=r2 + i, column=3, value=DAY_NAMES[day]).font = value_font
+
+    ws.sheet_properties.tabColor = "305496"
+
+
+def build_excel(
+    all_diff: pd.DataFrame,
+    missing_sap: pd.DataFrame,
+    missing_tour: pd.DataFrame,
+    tour_scope: pd.DataFrame,
+    direct_tourkunden: pd.DataFrame,
+    direct_unique: pd.DataFrame,
+    selected_sheets: Optional[Dict[str, str]] = None,
+) -> bytes:
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        sheets = [
+            ("Alle Unterschiede", _add_count_column(all_diff), True),
+            ("Fehlt in SAP", _add_count_column(missing_sap), True),
+            ("Fehlt in Tour", _add_count_column(missing_tour), True),
+            ("Geprüfter Tourbereich", tour_scope[tour_scope_columns()] if not tour_scope.empty else pd.DataFrame(columns=tour_scope_columns()), True),
+            ("Direkt Tourkunden", direct_tourkunden, True),
+            ("Direkt Kunden", direct_unique, False),
+        ]
+        for sheet_name, df, use_colors in sheets:
+            df.to_excel(writer, index=False, sheet_name=sheet_name, na_rep="")
+            _format_sheet(writer, sheet_name, df, use_bereich_colors=use_colors)
+
+        # Zusammenfassung als erstes Blatt
+        counts = {
+            "tour_scope": len(tour_scope),
+            "nms": int((tour_scope["Bereich"] == "NMS").sum()) if not tour_scope.empty and "Bereich" in tour_scope.columns else 0,
+            "malchow": int((tour_scope["Bereich"] == "Malchow").sum()) if not tour_scope.empty and "Bereich" in tour_scope.columns else 0,
+            "direkt": int((tour_scope["Bereich"] == "Direkt").sum()) if not tour_scope.empty and "Bereich" in tour_scope.columns else 0,
+            "missing_sap": len(missing_sap),
+            "missing_tour": len(missing_tour),
+            "all_diff": len(all_diff),
+            "direct_unique": len(direct_unique),
+        }
+        _write_summary_sheet(writer, counts, selected_sheets or {})
+
+        # Tab-Farben setzen
+        tab_colors = {
+            "Alle Unterschiede": "C00000",
+            "Fehlt in SAP": "ED7D31",
+            "Fehlt in Tour": "FFC000",
+            "Geprüfter Tourbereich": "305496",
+            "Direkt Tourkunden": "548235",
+            "Direkt Kunden": "7F7F7F",
+        }
+        wb = writer.book
+        for ws in wb.worksheets:
+            if ws.title in tab_colors:
+                ws.sheet_properties.tabColor = tab_colors[ws.title]
+            ws.sheet_state = "visible"
+        if wb.worksheets:
+            wb.active = 0
+    return output.getvalue()
 
 # ---------------------------------------------------------------------------
 # Streamlit UI
@@ -848,14 +1000,15 @@ if run:
         direct_unique = build_direct_unique_customers(direct_tourkunden)
 
         # Harte Sicherheitsprüfung: Im Direktbereich dürfen nur die sechs freigegebenen Tournummern stehen.
-        if not direct_tourkunden.empty:
-            bad_direct = direct_tourkunden[~direct_tourkunden["Tournummer Tour"].isin(DIRECT_ALLOWED_TOURS)]
+        if not direct_tourkunden.empty and "Tournummer Tour" in direct_tourkunden.columns:
+            tn_clean = direct_tourkunden["Tournummer Tour"].map(value_to_clean_text)
+            bad_direct = direct_tourkunden[~tn_clean.isin(DIRECT_ALLOWED_TOURS)]
             if not bad_direct.empty:
                 st.error("Direkt enthält ungefilterte Tournummern. Der Export wurde gestoppt, damit nicht das ganze Direkt-Blatt verglichen wird.")
                 st.dataframe(bad_direct, use_container_width=True, hide_index=True)
                 st.stop()
 
-        excel_bytes = build_excel(all_diff, missing_sap, missing_tour, tour_scope, direct_tourkunden, direct_unique)
+        excel_bytes = build_excel(all_diff, missing_sap, missing_tour, tour_scope, direct_tourkunden, direct_unique, selected_sheets)
 
         st.session_state["result"] = {
             "sap_sheet": sap_sheet,
