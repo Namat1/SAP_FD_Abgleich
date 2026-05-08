@@ -890,6 +890,28 @@ def _write_summary_sheet(writer, counts: Dict[str, int], selected_sheets: Dict[s
     for i, tour in enumerate(sorted(DIRECT_ALLOWED_TOURS), start=1):
         ws.cell(row=r2 + i, column=2, value=tour).font = value_font
 
+    # Legende Hinweis-Spalte
+    r3 = r2 + len(DIRECT_ALLOWED_TOURS) + 2
+    ws.cell(row=r3, column=2, value="Legende Hinweis-Spalte").font = header_font
+    ws.cell(row=r3, column=2).fill = header_fill
+    ws.cell(row=r3, column=3).fill = header_fill
+    ws.merge_cells(start_row=r3, start_column=2, end_row=r3, end_column=3)
+
+    legende = [
+        ("Gemeinsame LT", "Liefertage die in SAP und Tourenplanung übereinstimmen."),
+        ("Nur in SAP", "Liefertage die nur in SAP stehen, nicht in der Tourenplanung."),
+        ("Nur in Tour", "Liefertage die nur in der Tourenplanung stehen, nicht in SAP."),
+        ("SAP enthält alle Tour-LT plus extra", "SAP hat alle Tage aus der Tour und zusätzlich weitere."),
+        ("SAP enthält KEINE zusätzlichen LT", "SAP hat keine Tage über die Tourenplanung hinaus."),
+        ("", ""),
+        ("Kürzel", "Mo, Die, Mitt, Don, Fr, Sam"),
+    ]
+    for i, (bez, erkl) in enumerate(legende, start=1):
+        ws.cell(row=r3 + i, column=2, value=bez).font = label_font if bez else value_font
+        ws.cell(row=r3 + i, column=3, value=erkl).font = value_font
+
+    ws.column_dimensions["C"].width = 56
+
     ws.sheet_properties.tabColor = "305496"
 
 
