@@ -49,6 +49,18 @@ DIRECT_TOUR_BY_DAY: Dict[int, str] = {
     6: "6030",
 }
 
+
+# In der aktuellen Tourenplanung ist die Donnerstagsspalte im Blatt DIREKT leer,
+# obwohl diese Kunden laut Tourenliste auf 4058 laufen.
+# Deshalb wird 4058 für diese SAP-Nummern zusätzlich als Direkt-Tour gesetzt.
+DIRECT_4058_SAPS: Set[str] = {
+    "213458",
+    "213568",
+    "214289",
+    "218601",
+    "218804",
+}
+
 TOUR_SHEET_RULES = [
     {
         "bereich": "NMS",
@@ -544,6 +556,31 @@ def read_tourenplanung(uploaded_file) -> Tuple[pd.DataFrame, List[str], List[str
                     "Tournummer Tour": tournummer,
                 })
 
+        if direct_filter:
+            # 4058 steht in der gelieferten Tourenplanung nicht in der Donnerstagsspalte,
+            # die Tourkunden sind aber fachlich bekannt und werden hier zusätzlich in den
+            # geprüften Direktbereich aufgenommen. Es werden nur Kunden ergänzt, die im
+            # Direkt-Blatt tatsächlich vorkommen.
+            direkt_saps_im_blatt = set(work["sap"].astype(str))
+            existing_keys = {
+                (value_to_clean_text(item.get("sap")), int(item.get("tag_num")), value_to_clean_text(item.get("Tournummer Tour")))
+                for item in rows
+                if value_to_clean_text(item.get("sap"))
+            }
+            for sap in sorted(DIRECT_4058_SAPS):
+                if sap not in direkt_saps_im_blatt:
+                    continue
+                key = (sap, 4, "4058")
+                if key in existing_keys:
+                    continue
+                rows.append({
+                    "sap": sap,
+                    "Bereich": bereich,
+                    "Blatt Tourenplanung": sheet_name,
+                    "tag_num": 4,
+                    "Tournummer Tour": "4058",
+                })
+
         if rows:
             frames.append(pd.DataFrame(rows))
 
@@ -759,6 +796,82 @@ def build_overview(missing_sap: pd.DataFrame, missing_tour: pd.DataFrame, tour_d
     return pd.DataFrame(rows)
 
 
+def build_checked_tour_scope(
+    tour_df: pd.DataFrame,
+    customer_info: Dict[str, Dict[str, str]],
+) -> pd.DataFrame:
+    """Zeigt exakt, welche Tour-Zellen tatsächlich in die Prüfung laufen.
+
+    Für Direkt sind das ausschließlich die Tournummern 1058, 2058, 3058, 4058, 5058 und 6030. Für 4058 werden die fünf fachlich zugeordneten Kunden zusätzlich gesetzt, falls die Donnerstagsspalte im Direkt-Blatt leer ist.
+    Damit ist sofort sichtbar, ob der Direkt-Filter korrekt greift.
+    """
+    columns = [
+        "Bereich",
+        "Blatt Tourenplanung",
+        "SAP Nummer",
+        "Name",
+        "Straße",
+        "Ort",
+        "Liefertag",
+        "Tournummer Tour",
+    ]
+    if tour_df is None or tour_df.empty:
+        return pd.DataFrame(columns=columns)
+
+    out = tour_df.copy()
+    out["SAP Nummer"] = out["sap"]
+    out["Name"] = out["sap"].map(lambda s: customer_info.get(s, {}).get("name", ""))
+    out["Straße"] = out["sap"].map(lambda s: customer_info.get(s, {}).get("strasse", ""))
+    out["Ort"] = out["sap"].map(lambda s: customer_info.get(s, {}).get("ort", ""))
+    out["Liefertag"] = out["tag_num"].map(day_to_text)
+
+    out["_BereichSort"] = out["Bereich"].map({"NMS": 1, "Malchow": 2, "Direkt": 3}).fillna(99)
+    out["_SapSort"] = pd.to_numeric(out["sap"], errors="coerce").fillna(9_999_999_999)
+    out["_TourSort"] = pd.to_numeric(out["Tournummer Tour"], errors="coerce").fillna(9_999_999_999)
+    out = out.sort_values(["_BereichSort", "Blatt Tourenplanung", "_SapSort", "tag_num", "_TourSort"]).reset_index(drop=True)
+    return out[columns]
+
+
+def build_direct_tour_customers(
+    tour_df: pd.DataFrame,
+    customer_info: Dict[str, Dict[str, str]],
+) -> pd.DataFrame:
+    """Liste der Direkt-Kunden, die wirklich auf den sechs freigegebenen Touren stehen."""
+    columns = [
+        "SAP Nummer",
+        "Name",
+        "Straße",
+        "Ort",
+        "Gefundene Touren und Liefertage",
+        "Anzahl Tour-Zeilen",
+    ]
+    if tour_df is None or tour_df.empty:
+        return pd.DataFrame(columns=columns)
+
+    direct = tour_df[tour_df["Bereich"].astype(str).eq("Direkt")].copy()
+    if direct.empty:
+        return pd.DataFrame(columns=columns)
+
+    direct["Tour und Liefertag"] = direct.apply(
+        lambda row: f'{value_to_clean_text(row["Tournummer Tour"])} {DAY_NAMES[int(row["tag_num"])]}',
+        axis=1,
+    )
+
+    agg = direct.groupby("sap", as_index=False).agg(
+        touren=("Tour und Liefertag", lambda x: ", ".join(sorted(set(x), key=lambda v: (v.split()[0], v)))),
+        anzahl=("Tour und Liefertag", "size"),
+    )
+    agg["SAP Nummer"] = agg["sap"]
+    agg["Name"] = agg["sap"].map(lambda s: customer_info.get(s, {}).get("name", ""))
+    agg["Straße"] = agg["sap"].map(lambda s: customer_info.get(s, {}).get("strasse", ""))
+    agg["Ort"] = agg["sap"].map(lambda s: customer_info.get(s, {}).get("ort", ""))
+    agg["Gefundene Touren und Liefertage"] = agg["touren"]
+    agg["Anzahl Tour-Zeilen"] = agg["anzahl"]
+    agg["_SapSort"] = pd.to_numeric(agg["SAP Nummer"], errors="coerce").fillna(9_999_999_999)
+    agg = agg.sort_values(["_SapSort", "SAP Nummer"]).reset_index(drop=True)
+    return agg[columns]
+
+
 def _filter_dataframe(df: pd.DataFrame, suche: str, bereich: str = "Alle") -> pd.DataFrame:
     if df is None or df.empty:
         return df
@@ -798,6 +911,8 @@ _COL_WIDTH_HINTS = {
     "LT SAP": (24, 48),
     "LT Tourenplanung": (24, 48),
     "Hinweis": (40, 70),
+    "Gefundene Touren und Liefertage": (30, 60),
+    "Anzahl Tour-Zeilen": (14, 18),
 }
 
 
@@ -884,7 +999,13 @@ def _format_sheet(writer, sheet_name: str, df: pd.DataFrame) -> None:
     ws.sheet_state = "visible"
 
 
-def build_excel(missing_sap: pd.DataFrame, missing_tour: pd.DataFrame, all_diff: pd.DataFrame) -> bytes:
+def build_excel(
+    missing_sap: pd.DataFrame,
+    missing_tour: pd.DataFrame,
+    all_diff: pd.DataFrame,
+    checked_scope: pd.DataFrame,
+    direct_tour_customers: pd.DataFrame,
+) -> bytes:
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         all_diff.to_excel(writer, index=False, sheet_name="Alle Unterschiede", na_rep="")
@@ -895,6 +1016,12 @@ def build_excel(missing_sap: pd.DataFrame, missing_tour: pd.DataFrame, all_diff:
 
         missing_tour.to_excel(writer, index=False, sheet_name="Fehlt in Tour", na_rep="")
         _format_sheet(writer, "Fehlt in Tour", missing_tour)
+
+        direct_tour_customers.to_excel(writer, index=False, sheet_name="Direkt Tourkunden", na_rep="")
+        _format_sheet(writer, "Direkt Tourkunden", direct_tour_customers)
+
+        checked_scope.to_excel(writer, index=False, sheet_name="Geprüfter Tourbereich", na_rep="")
+        _format_sheet(writer, "Geprüfter Tourbereich", checked_scope)
 
         wb = writer.book
         for ws in wb.worksheets:
@@ -966,7 +1093,9 @@ if run:
         missing_sap = build_missing_in_sap(tour_df, days_by_sap, customer_info)
         missing_tour = build_missing_in_tour(tour_df, days_by_sap, customer_info)
         all_diff = build_all_differences(missing_sap, missing_tour)
-        excel_bytes = build_excel(missing_sap, missing_tour, all_diff)
+        checked_scope = build_checked_tour_scope(tour_df, customer_info)
+        direct_tour_customers = build_direct_tour_customers(tour_df, customer_info)
+        excel_bytes = build_excel(missing_sap, missing_tour, all_diff, checked_scope, direct_tour_customers)
 
         st.session_state["result"] = {
             "days_by_sap": days_by_sap,
@@ -979,6 +1108,8 @@ if run:
             "missing_sap": missing_sap,
             "missing_tour": missing_tour,
             "all_diff": all_diff,
+            "checked_scope": checked_scope,
+            "direct_tour_customers": direct_tour_customers,
             "excel_bytes": excel_bytes,
         }
     except Exception as exc:
@@ -994,6 +1125,8 @@ if result:
     missing_tour = result["missing_tour"]
     all_diff = result["all_diff"]
     tour_df = result["tour_df"]
+    checked_scope = result["checked_scope"]
+    direct_tour_customers = result["direct_tour_customers"]
 
     st.divider()
     head_left, head_right = st.columns([3, 1])
@@ -1013,20 +1146,22 @@ if result:
             use_container_width=True,
         )
 
-    m1, m2, m3, m4 = st.columns(4)
+    m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("Alle Unterschiede", len(all_diff))
     m2.metric("Fehlt in SAP", len(missing_sap))
     m3.metric("Fehlt in Tour", len(missing_tour))
     m4.metric("Geprüfte Tour-Zeilen", len(tour_df))
+    m5.metric("Direkt Tourkunden", len(direct_tour_customers))
 
     overview = build_overview(missing_sap, missing_tour, tour_df)
 
-    tab_overview, tab_all, tab_sap, tab_tour, tab_scope = st.tabs([
+    tab_overview, tab_all, tab_sap, tab_tour, tab_direct_customers, tab_scope = st.tabs([
         "Übersicht",
         f"Alle Unterschiede ({len(all_diff)})",
         f"Fehlt in SAP ({len(missing_sap)})",
         f"Fehlt in Tour ({len(missing_tour)})",
-        f"Geprüfter Tourbereich ({len(tour_df)})",
+        f"Direkt Tourkunden ({len(direct_tour_customers)})",
+        f"Geprüfter Tourbereich ({len(checked_scope)})",
     ])
 
     with tab_overview:
@@ -1055,18 +1190,25 @@ if result:
     with tab_tour:
         render_result_table(missing_tour, "tour")
 
+    with tab_direct_customers:
+        if direct_tour_customers.empty:
+            st.info("Keine Direkt-Kunden auf den Tournummern 1058, 2058, 3058, 4058, 5058 oder 6030 gefunden.")
+        else:
+            suche = st.text_input("Suchen in Direkt Tourkunden", key="direct_customers_suche")
+            view = direct_tour_customers.copy()
+            if suche:
+                mask = pd.Series(False, index=view.index)
+                for col in view.columns:
+                    mask = mask | view[col].astype(str).str.lower().str.contains(suche.lower(), na=False, regex=False)
+                view = view[mask]
+            st.caption(f"{len(view)} von {len(direct_tour_customers)} Direkt-Kunden")
+            st.dataframe(view, use_container_width=True, hide_index=True)
+
     with tab_scope:
-        if tour_df.empty:
+        if checked_scope.empty:
             st.info("Keine geprüften Tourzeilen.")
         else:
-            scope_view = tour_df.rename(columns={
-                "sap": "SAP Nummer",
-                "tag_num": "Tag Nummer",
-            }).copy()
-            scope_view["Liefertag"] = scope_view["Tag Nummer"].map(day_to_text)
-            scope_view = scope_view[[
-                "Bereich", "Blatt Tourenplanung", "SAP Nummer", "Liefertag", "Tournummer Tour"
-            ]].sort_values(["Bereich", "Blatt Tourenplanung", "SAP Nummer", "Liefertag", "Tournummer Tour"])
+            scope_view = checked_scope.copy()
             suche = st.text_input("Suchen im geprüften Bereich", key="scope_suche")
             if suche:
                 mask = pd.Series(False, index=scope_view.index)
