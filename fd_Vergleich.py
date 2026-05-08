@@ -721,13 +721,27 @@ def build_missing_in_tour(
     sap_records: pd.DataFrame,
     customer_info: Dict[str, Dict[str, str]],
 ) -> pd.DataFrame:
-    """SAP hat den Tag / die Tour, die geprüfte Tourenplanung nicht."""
+    """SAP hat den Tag / die Tour, die geprüfte Tourenplanung nicht.
+
+    Wichtig: Die Rückrichtung wird auf den tatsächlich geprüften Tourbereich begrenzt.
+    Es werden also nicht mehr alle SAP-Tage eines Kunden gegen den Direkt-Bereich geworfen.
+
+    - Wenn SAP eine Tournummer enthält, wird exakt SAP Nummer + Liefertag + Tournummer verglichen.
+    - Für Direkt werden dabei ausschließlich 1058, 2058, 3058, 4058, 5058 und 6030 bewertet.
+    - Wenn SAP keine Tournummer enthält, wird Direkt in der Rückrichtung nicht pauschal über alle
+      SAP-Tage geprüft, weil dann nicht sicher erkennbar ist, ob der SAP-Tag zu einer der
+      gewünschten Direkt-Touren gehört. Dadurch erscheinen keine fremden Direkt-Kunden mehr.
+    """
     if tour_df.empty:
         return _empty_result_df()
 
     sap_tours_by_day = build_sap_tours_by_day(sap_records)
     days_by_scope = build_days_by_scope(tour_df)
     tours_by_scope_day = build_tours_by_scope_day(tour_df)
+
+    has_sap_tour_numbers = False
+    if sap_records is not None and not sap_records.empty and "Tournummer SAP" in sap_records.columns:
+        has_sap_tour_numbers = sap_records["Tournummer SAP"].fillna("").astype(str).str.strip().ne("").any()
 
     scope_rows = (
         tour_df[["sap", "Bereich", "Blatt Tourenplanung"]]
@@ -752,11 +766,17 @@ def build_missing_in_tour(
 
             if sap_tours_for_day:
                 # Exakter Tournummernvergleich, wenn SAP-Tournummern vorhanden sind.
-                missing_tours = sorted(sap_tours_for_day - tour_tours_for_day, key=lambda x: int(x) if x.isdigit() else x)
-                for sap_tour in missing_tours:
-                    if bereich == "Direkt" and sap_tour not in DIRECT_TOURS:
-                        # Im Direktbereich nur die gewünschten Touren bewerten.
+                if bereich == "Direkt":
+                    # Direkt: nur die gewünschten Tournummern aus SAP bewerten.
+                    sap_tours_for_day = {tour for tour in sap_tours_for_day if tour in DIRECT_TOURS}
+                    if not sap_tours_for_day:
                         continue
+
+                missing_tours = sorted(
+                    sap_tours_for_day - tour_tours_for_day,
+                    key=lambda x: int(x) if str(x).isdigit() else str(x),
+                )
+                for sap_tour in missing_tours:
                     rows.append({
                         "sap": sap,
                         "Bereich": bereich,
@@ -766,15 +786,19 @@ def build_missing_in_tour(
                         "Tournummer SAP": sap_tour,
                     })
             else:
-                # Fallback: SAP hat keinen Tournummernwert, dann nur Liefertag vergleichen.
+                # Ohne SAP-Tournummer kann Direkt nicht zuverlässig gegen einzelne Tournummern geprüft werden.
+                # Sonst würde jeder weitere SAP-Liefertag des Kunden als Fehler im Direktbereich auftauchen.
+                if bereich == "Direkt" and not has_sap_tour_numbers:
+                    continue
+
+                # Für NMS und Malchow bleibt der reine Liefertagsvergleich erhalten.
                 if int(day) not in tour_days:
-                    expected = expected_direct_tour(day) if bereich == "Direkt" else "(fehlt in Tour)"
                     rows.append({
                         "sap": sap,
                         "Bereich": bereich,
                         "Blatt Tourenplanung": sheet_name,
                         "tag_num": int(day),
-                        "Tournummer Tour": expected,
+                        "Tournummer Tour": "(fehlt in Tour)",
                         "Tournummer SAP": "",
                     })
 
@@ -960,7 +984,7 @@ def build_excel(missing_sap: pd.DataFrame, missing_tour: pd.DataFrame, all_diff:
 st.set_page_config(page_title="SAP gegen Tourenplanung", layout="wide")
 
 st.title("SAP gegen Tourenplanung")
-st.caption("Prüfung nur für NMS, Malchow und Direkt mit den festgelegten Tournummern.")
+st.caption("Prüfung nur für NMS, Malchow und die ausgewählten Direkt-Touren. Direkt wird hart auf Kunden aus diesen Touren begrenzt.")
 
 st.markdown(
     """
@@ -970,8 +994,8 @@ NMS komplett · Malchow komplett · Direkt nur mit den Tournummern
 <b>1058, 2058, 3058, 4058, 5058 und 6030</b>.<br><br>
 <b>Die Tournummern werden jetzt aus jeder Tageszelle einzeln gelesen.</b>
 Wenn in einer Zelle zum Beispiel <b>6029 / 6030</b> steht, wird für Direkt nur <b>6030</b> bewertet.
-Wenn die SAP-Datei eine Tournummer- oder Transportgruppen-Spalte enthält, wird zusätzlich exakt nach
-<b>SAP Nummer + Liefertag + Tournummer</b> verglichen.
+Wenn die SAP-Datei eine Tournummer- oder Transportgruppen-Spalte enthält, wird exakt nach
+<b>SAP Nummer + Liefertag + Tournummer</b> verglichen. Ohne SAP-Tournummer wird Direkt in der Rückrichtung nicht pauschal über alle SAP-Tage geprüft.
 </div>
 """,
     unsafe_allow_html=True,
