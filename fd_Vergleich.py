@@ -58,16 +58,6 @@ DIRECT_TOUR_BY_DAY = {
     6: "6030",
 }
 
-# 4058 steht in der gelieferten Tourenplanung nicht sauber in der Donnerstag-Spalte.
-# Diese fünf SAP Nummern gehören laut Vorgabe trotzdem zur Direkt-Tour 4058 am Donnerstag.
-DIRECT_4058_FIXED_SAPS: Set[str] = {
-    "213458",
-    "213568",
-    "214289",
-    "218601",
-    "218804",
-}
-
 SAP_COL_INDEX = 0       # SAP-Datei Fallback: A = SAP Nummer
 SAP_DAY_COL_INDEX = 6   # SAP-Datei Fallback: G = Liefertag
 TOUR_CSB_COL_INDEX = 0  # Tourenplanung Fallback: A = CSB
@@ -442,29 +432,6 @@ def read_tourenplanung(uploaded_file) -> Tuple[pd.DataFrame, Dict[str, str], Dic
                         "Quelle": "Tourenplanung",
                     })
 
-            # Zusatzregel 4058: diese fünf Kunden gehören zu Donnerstag 4058.
-            if bereich == "Direkt" and sap in DIRECT_4058_FIXED_SAPS:
-                exists = any(
-                    r["SAP Nummer"] == sap
-                    and r["Liefertag Nr"] == 4
-                    and r["Tournummer Tour"] == "4058"
-                    for r in rows
-                )
-                if not exists:
-                    rows.append({
-                        "Bereich": bereich,
-                        "Blatt Tourenplanung": sheet_name,
-                        "CSB": csb,
-                        "SAP Nummer": sap,
-                        "Name": name,
-                        "Straße": strasse,
-                        "PLZ": plz,
-                        "Ort": ort,
-                        "Liefertag Nr": 4,
-                        "Liefertag": "4 Donnerstag",
-                        "Tournummer Tour": "4058",
-                        "Quelle": "Zusatzregel 4058",
-                    })
 
     if not rows:
         empty = pd.DataFrame(columns=tour_scope_columns())
