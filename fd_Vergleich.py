@@ -470,10 +470,10 @@ def result_columns() -> List[str]:
         "Straße",
         "PLZ",
         "Ort",
-        "Liefertag",
         "LT SAP",
         "LT Tourenplanung",
         "Tournummer Tour",
+        "Liefertag",
         "Hinweis",
     ]
 
