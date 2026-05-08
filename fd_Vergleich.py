@@ -49,14 +49,6 @@ DAY_COLUMN_CANDIDATES = {
 
 # Aus Direkt werden nur diese Touren geprüft.
 DIRECT_ALLOWED_TOURS: Set[str] = {"1058", "2058", "3058", "4058", "5058", "6030"}
-DIRECT_TOUR_BY_DAY = {
-    1: "1058",
-    2: "2058",
-    3: "3058",
-    4: "4058",
-    5: "5058",
-    6: "6030",
-}
 
 SAP_COL_INDEX = 0       # SAP-Datei Fallback: A = SAP Nummer
 SAP_DAY_COL_INDEX = 6   # SAP-Datei Fallback: G = Liefertag
@@ -562,8 +554,6 @@ def build_missing_in_tour(tour_df: pd.DataFrame, days_by_sap: Dict[str, Set[int]
         for day_num in fehlend:
             bereich = info.get("bereich", "")
             tournummer = "nicht in Tour vorhanden"
-            if bereich == "Direkt":
-                tournummer = DIRECT_TOUR_BY_DAY.get(day_num, "nicht in Tour vorhanden")
 
             rows.append({
                 "Prüfung": "Fehlt in Tour / zu viel in SAP",
@@ -849,11 +839,9 @@ def _write_summary_sheet(writer, counts: Dict[str, int], selected_sheets: Dict[s
     r2 = r + len(selected_sheets) + 2
     ws.cell(row=r2, column=2, value="Geprüfte Direkt-Touren").font = header_font
     ws.cell(row=r2, column=2).fill = header_fill
-    ws.cell(row=r2, column=3, value="Wochentag").font = header_font
     ws.cell(row=r2, column=3).fill = header_fill
-    for i, (day, tour) in enumerate(sorted(DIRECT_TOUR_BY_DAY.items()), start=1):
+    for i, tour in enumerate(sorted(DIRECT_ALLOWED_TOURS), start=1):
         ws.cell(row=r2 + i, column=2, value=tour).font = value_font
-        ws.cell(row=r2 + i, column=3, value=DAY_NAMES[day]).font = value_font
 
     ws.sheet_properties.tabColor = "305496"
 
