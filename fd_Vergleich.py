@@ -910,14 +910,17 @@ def build_excel(missing_sap: pd.DataFrame, missing_tour: pd.DataFrame, all_diff:
 st.set_page_config(page_title="SAP gegen Tourenplanung", layout="wide")
 
 st.title("SAP gegen Tourenplanung")
-st.caption("Prüfung nur für NMS, Malchow und die ausgewählten Direkt-Touren. SAP wird nur nach SAP-Nummer und Liefertag geprüft.")
+st.caption("Exakte Auswahl: NMS komplett, Malchow komplett, Direkt nur Kunden/Tageszellen mit den freigegebenen Tournummern. SAP wird nur nach SAP-Nummer und Liefertag geprüft.")
 
 st.markdown(
     """
 <div style="padding:14px 16px;border:1px solid #d9e2ec;border-radius:12px;background:#f8fafc;margin-bottom:14px;">
-<b>Geprüft wird:</b><br>
-NMS komplett · Malchow komplett · Direkt nur mit den Tournummern
-<b>1058, 2058, 3058, 4058, 5058 und 6030</b>.<br><br>
+<b>Geprüft wird genau so:</b><br>
+<b>NMS:</b> alle Kunden, alle gesetzten Liefertage aus dem NMS-Blatt.<br>
+<b>Malchow:</b> alle Kunden, alle gesetzten Liefertage aus dem Malchow-Blatt.<br>
+<b>Direkt:</b> nur Tageszellen/Kunden, bei denen die Tournummer in der Zelle eine dieser Nummern ist:
+<b>1058, 2058, 3058, 4058, 5058 oder 6030</b>.<br><br>
+<b>Nicht geprüft werden:</b> MK und andere Direkt-Tournummern.<br>
 <b>Wichtig:</b> Eine Tournummer oder Transportgruppe aus SAP wird nicht gelesen und nicht verwendet.<br>
 SAP wird nur über <b>SAP Nummer + Liefertag</b> geprüft.<br>
 Die Spalte <b>Tournummer Tour</b> kommt ausschließlich aus der Tourenplanung.
@@ -1005,7 +1008,7 @@ if result:
         st.download_button(
             label="Excel herunterladen",
             data=result["excel_bytes"],
-            file_name="sap_tourenplanung_nms_malchow_direkt_ohne_sap_tournummer.xlsx",
+            file_name="sap_tourenplanung_nms_malchow_direkt_exakte_auswahl.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
         )
