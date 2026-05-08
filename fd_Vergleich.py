@@ -501,6 +501,52 @@ def aggregate_tour_numbers(tour_df: pd.DataFrame) -> pd.DataFrame:
     return agg
 
 
+def _short_day_list(days: Set[int]) -> str:
+    return ", ".join(DAY_SHORT[d] for d in sorted(days))
+
+
+def _build_hinweis_missing_in_sap(sap_days: Set[int], tour_days: Set[int], day_num: int) -> str:
+    """Hinweis für 'Fehlt in SAP / zu viel in Tour'."""
+    extra_tour = tour_days - sap_days      # In Tour aber nicht in SAP
+    extra_sap = sap_days - tour_days       # In SAP aber nicht in Tour
+    gemeinsam = sap_days & tour_days       # In beiden
+
+    parts: List[str] = []
+    if gemeinsam:
+        parts.append(f"Gemeinsame LT: {_short_day_list(gemeinsam)}")
+    parts.append(f"Nur in Tour: {_short_day_list(extra_tour)}" if extra_tour else "")
+    if extra_sap:
+        parts.append(f"Nur in SAP: {_short_day_list(extra_sap)}")
+
+    if not extra_sap and gemeinsam:
+        # SAP ist Teilmenge von Tour
+        parts.insert(0, "SAP enthält KEINE zusätzlichen LT.")
+    elif extra_sap and tour_days <= sap_days:
+        # SAP enthält alle Tour-LT plus extra
+        parts.insert(0, f"SAP enthält alle Tour-LT plus extra: {_short_day_list(extra_sap)}.")
+
+    return " | ".join(p for p in parts if p)
+
+
+def _build_hinweis_missing_in_tour(sap_days: Set[int], tour_days: Set[int], day_num: int) -> str:
+    """Hinweis für 'Fehlt in Tour / zu viel in SAP'."""
+    extra_sap = sap_days - tour_days       # In SAP aber nicht in Tour
+    extra_tour = tour_days - sap_days      # In Tour aber nicht in SAP
+    gemeinsam = sap_days & tour_days       # In beiden
+
+    parts: List[str] = []
+    if tour_days <= sap_days:
+        parts.append(f"SAP enthält alle Tour-LT plus extra: {_short_day_list(extra_sap)}.")
+    else:
+        parts.append(f"Nur in SAP: {_short_day_list(extra_sap)}" if extra_sap else "")
+        parts.append(f"Nur in Tour: {_short_day_list(extra_tour)}" if extra_tour else "")
+
+    if gemeinsam:
+        parts.append(f"Gemeinsame LT: {_short_day_list(gemeinsam)}")
+
+    return " | ".join(p for p in parts if p)
+
+
 def build_missing_in_sap(tour_df: pd.DataFrame, days_by_sap: Dict[str, Set[int]]) -> pd.DataFrame:
     if tour_df.empty:
         return pd.DataFrame(columns=result_columns())
@@ -515,6 +561,7 @@ def build_missing_in_sap(tour_df: pd.DataFrame, days_by_sap: Dict[str, Set[int]]
         sap_days = days_by_sap.get(sap, set())
         if day_num in sap_days:
             continue
+        tour_days = tour_days_by_sap.get(sap, set())
         rows.append({
             "Prüfung": "Fehlt in SAP / zu viel in Tour",
             "Bereich": row["Bereich"],
@@ -528,8 +575,8 @@ def build_missing_in_sap(tour_df: pd.DataFrame, days_by_sap: Dict[str, Set[int]]
             "Liefertag": f"{day_num} {DAY_NAMES[day_num]}",
             "Tournummer Tour": row.get("Tournummer Tour", ""),
             "LT SAP": sorted_day_text(sap_days),
-            "LT Tourenplanung": sorted_day_text(tour_days_by_sap.get(sap, set())),
-            "Hinweis": "Dieser Liefertag steht im geprüften Tourbereich, aber nicht in SAP.",
+            "LT Tourenplanung": sorted_day_text(tour_days),
+            "Hinweis": _build_hinweis_missing_in_sap(sap_days, tour_days, day_num),
         })
 
     return sort_result(pd.DataFrame(rows, columns=result_columns()))
@@ -569,7 +616,7 @@ def build_missing_in_tour(tour_df: pd.DataFrame, days_by_sap: Dict[str, Set[int]
                 "Tournummer Tour": tournummer,
                 "LT SAP": sorted_day_text(sap_days),
                 "LT Tourenplanung": sorted_day_text(tour_days),
-                "Hinweis": "Dieser Liefertag steht in SAP, aber nicht im geprüften Tourbereich.",
+                "Hinweis": _build_hinweis_missing_in_tour(sap_days, tour_days, day_num),
             })
 
     return sort_result(pd.DataFrame(rows, columns=result_columns()))
