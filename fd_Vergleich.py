@@ -472,8 +472,9 @@ def result_columns() -> List[str]:
         "Ort",
         "LT SAP",
         "LT Tourenplanung",
-        "Tournummer Tour",
-        "Liefertag",
+        "Gemeinsam",
+        "Nur in Tour",
+        "Nur in SAP",
         "Hinweis",
     ]
 
@@ -484,140 +485,126 @@ def aggregate_tour_days(tour_df: pd.DataFrame) -> Dict[str, Set[int]]:
     return tour_df.groupby("SAP Nummer")["Liefertag Nr"].agg(lambda x: set(int(v) for v in x)).to_dict()
 
 
-def aggregate_tour_numbers(tour_df: pd.DataFrame) -> pd.DataFrame:
+def _tour_numbers_by_day(tour_df: pd.DataFrame) -> Dict[str, Dict[int, str]]:
+    """Gibt pro SAP Nummer ein Dict {tag_nr: 'Tournummer(n)'} zurück."""
     if tour_df.empty:
-        return pd.DataFrame(columns=["SAP Nummer", "Liefertag Nr", "Tournummer Tour", "Bereich", "Blatt Tourenplanung", "CSB", "Name", "Straße", "PLZ", "Ort"])
-    agg = tour_df.groupby(["SAP Nummer", "Liefertag Nr"], as_index=False).agg(
-        Tournummer_Tour=("Tournummer Tour", lambda x: ", ".join(sorted(set(value_to_clean_text(v) for v in x if value_to_clean_text(v))))),
-        Bereich=("Bereich", lambda x: ", ".join(sorted(set(value_to_clean_text(v) for v in x if value_to_clean_text(v))))),
-        Blatt_Tourenplanung=("Blatt Tourenplanung", lambda x: ", ".join(sorted(set(value_to_clean_text(v) for v in x if value_to_clean_text(v))))),
-        CSB=("CSB", "first"),
-        Name=("Name", "first"),
-        Straße=("Straße", "first"),
-        PLZ=("PLZ", "first"),
-        Ort=("Ort", "first"),
-    )
-    agg = agg.rename(columns={"Tournummer_Tour": "Tournummer Tour", "Blatt_Tourenplanung": "Blatt Tourenplanung"})
-    return agg
+        return {}
+    out: Dict[str, Dict[int, str]] = {}
+    for _, row in tour_df.iterrows():
+        sap = str(row["SAP Nummer"])
+        day = int(row["Liefertag Nr"])
+        tn = value_to_clean_text(row.get("Tournummer Tour", ""))
+        entry = out.setdefault(sap, {})
+        existing = entry.get(day, "")
+        if tn and tn not in existing:
+            entry[day] = f"{existing}, {tn}" if existing else tn
+    return out
 
 
 def _short_day_list(days: Set[int]) -> str:
     return ", ".join(DAY_SHORT[d] for d in sorted(days))
 
 
-def _build_hinweis_missing_in_sap(sap_days: Set[int], tour_days: Set[int], day_num: int) -> str:
-    """Hinweis für 'Fehlt in SAP / zu viel in Tour'."""
-    extra_tour = tour_days - sap_days      # In Tour aber nicht in SAP
-    extra_sap = sap_days - tour_days       # In SAP aber nicht in Tour
-    gemeinsam = sap_days & tour_days       # In beiden
-
+def _day_list_with_tours(days: Set[int], tour_by_day: Dict[int, str]) -> str:
+    """z.B. 'Do (44444), Sa (6001)'"""
     parts: List[str] = []
-    if gemeinsam:
-        parts.append(f"Gemeinsame LT: {_short_day_list(gemeinsam)}")
-    parts.append(f"Nur in Tour: {_short_day_list(extra_tour)}" if extra_tour else "")
-    if extra_sap:
-        parts.append(f"Nur in SAP: {_short_day_list(extra_sap)}")
-
-    if not extra_sap and gemeinsam:
-        # SAP ist Teilmenge von Tour
-        parts.insert(0, "SAP enthält KEINE zusätzlichen LT.")
-    elif extra_sap and tour_days <= sap_days:
-        # SAP enthält alle Tour-LT plus extra
-        parts.insert(0, f"SAP enthält alle Tour-LT plus extra: {_short_day_list(extra_sap)}.")
-
-    return " | ".join(p for p in parts if p)
+    for d in sorted(days):
+        tn = tour_by_day.get(d, "")
+        parts.append(f"{DAY_SHORT[d]} ({tn})" if tn else DAY_SHORT[d])
+    return ", ".join(parts)
 
 
-def _build_hinweis_missing_in_tour(sap_days: Set[int], tour_days: Set[int], day_num: int) -> str:
-    """Hinweis für 'Fehlt in Tour / zu viel in SAP'."""
-    extra_sap = sap_days - tour_days       # In SAP aber nicht in Tour
-    extra_tour = tour_days - sap_days      # In Tour aber nicht in SAP
-    gemeinsam = sap_days & tour_days       # In beiden
+def _build_hinweis(sap_days: Set[int], tour_days: Set[int]) -> str:
+    """Einzeiliger Hinweis pro Kunde."""
+    gemeinsam = sap_days & tour_days
+    nur_sap = sap_days - tour_days
+    nur_tour = tour_days - sap_days
 
-    parts: List[str] = []
-    if tour_days <= sap_days:
-        parts.append(f"SAP enthält alle Tour-LT plus extra: {_short_day_list(extra_sap)}.")
-    else:
-        parts.append(f"Nur in SAP: {_short_day_list(extra_sap)}" if extra_sap else "")
-        parts.append(f"Nur in Tour: {_short_day_list(extra_tour)}" if extra_tour else "")
+    if not nur_sap and not nur_tour:
+        return "Kein Unterschied."
+    if nur_sap and not nur_tour:
+        return f"SAP enthält alle Tour-LT plus extra: {_short_day_list(nur_sap)}."
+    if nur_tour and not nur_sap:
+        return f"Tour enthält alle SAP-LT plus extra: {_short_day_list(nur_tour)}."
+    if gemeinsam and tour_days <= sap_days:
+        return f"SAP enthält alle Tour-LT plus extra: {_short_day_list(nur_sap)}."
+    # Beide Seiten haben eigene
+    return f"Abweichungen in beiden Richtungen."
 
-    if gemeinsam:
-        parts.append(f"Gemeinsame LT: {_short_day_list(gemeinsam)}")
 
-    return " | ".join(p for p in parts if p)
-
-
-def build_missing_in_sap(tour_df: pd.DataFrame, days_by_sap: Dict[str, Set[int]]) -> pd.DataFrame:
+def build_differences(
+    tour_df: pd.DataFrame,
+    days_by_sap: Dict[str, Set[int]],
+    customer_info: Dict[str, Dict[str, str]],
+) -> pd.DataFrame:
+    """Ein Eintrag pro Kunde mit allen Abweichungen."""
     if tour_df.empty:
         return pd.DataFrame(columns=result_columns())
 
     tour_days_by_sap = aggregate_tour_days(tour_df)
-    grouped = aggregate_tour_numbers(tour_df)
+    tn_by_day = _tour_numbers_by_day(tour_df)
+
+    # Alle relevanten SAP-Nummern: aus Tour + aus SAP (soweit im Scope)
+    all_saps = set(tour_df["SAP Nummer"].astype(str)) | set(days_by_sap.keys())
+    # Nur SAPs die auch im Tourbereich vorkommen
+    scope_saps = set(tour_df["SAP Nummer"].astype(str))
+    all_saps = all_saps & scope_saps
 
     rows: List[dict] = []
-    for _, row in grouped.iterrows():
-        sap = row["SAP Nummer"]
-        day_num = int(row["Liefertag Nr"])
-        sap_days = days_by_sap.get(sap, set())
-        if day_num in sap_days:
-            continue
-        tour_days = tour_days_by_sap.get(sap, set())
-        rows.append({
-            "Prüfung": "Fehlt in SAP / zu viel in Tour",
-            "Bereich": row["Bereich"],
-            "Blatt Tourenplanung": row["Blatt Tourenplanung"],
-            "CSB": row.get("CSB", ""),
-            "SAP Nummer": sap,
-            "Name": row.get("Name", ""),
-            "Straße": row.get("Straße", ""),
-            "PLZ": row.get("PLZ", ""),
-            "Ort": row.get("Ort", ""),
-            "Liefertag": f"{day_num} {DAY_NAMES[day_num]}",
-            "Tournummer Tour": row.get("Tournummer Tour", ""),
-            "LT SAP": sorted_day_text(sap_days),
-            "LT Tourenplanung": sorted_day_text(tour_days),
-            "Hinweis": _build_hinweis_missing_in_sap(sap_days, tour_days, day_num),
-        })
-
-    return sort_result(pd.DataFrame(rows, columns=result_columns()))
-
-
-def build_missing_in_tour(tour_df: pd.DataFrame, days_by_sap: Dict[str, Set[int]], customer_info: Dict[str, Dict[str, str]]) -> pd.DataFrame:
-    if tour_df.empty:
-        return pd.DataFrame(columns=result_columns())
-
-    selected_saps = set(tour_df["SAP Nummer"].astype(str))
-    tour_days_by_sap = aggregate_tour_days(tour_df)
-
-    rows: List[dict] = []
-    for sap in sorted(selected_saps, key=lambda v: int(v) if str(v).isdigit() else 9_999_999_999):
+    for sap in sorted(all_saps, key=lambda v: int(v) if str(v).isdigit() else 9_999_999_999):
         sap_days = days_by_sap.get(sap, set())
         tour_days = tour_days_by_sap.get(sap, set())
-        fehlend = sorted(sap_days - tour_days)
-        if not fehlend:
-            continue
+
+        nur_tour = tour_days - sap_days    # Fehlt in SAP
+        nur_sap = sap_days - tour_days     # Fehlt in Tour
+        gemeinsam = sap_days & tour_days
+
+        if not nur_tour and not nur_sap:
+            continue  # Kein Unterschied
+
+        # Prüfung bestimmen
+        if nur_tour and nur_sap:
+            pruefung = "Beides"
+        elif nur_tour:
+            pruefung = "Fehlt in SAP"
+        else:
+            pruefung = "Fehlt in Tour"
 
         info = customer_info.get(sap, {})
-        for day_num in fehlend:
-            bereich = info.get("bereich", "")
-            tournummer = "nicht in Tour vorhanden"
+        sap_tour_nums = tn_by_day.get(sap, {})
 
-            rows.append({
-                "Prüfung": "Fehlt in Tour / zu viel in SAP",
-                "Bereich": bereich,
-                "Blatt Tourenplanung": info.get("blatt", ""),
-                "CSB": info.get("csb", ""),
-                "SAP Nummer": sap,
-                "Name": info.get("name", ""),
-                "Straße": info.get("strasse", ""),
-                "PLZ": info.get("plz", ""),
-                "Ort": info.get("ort", ""),
-                "Liefertag": f"{day_num} {DAY_NAMES[day_num]}",
-                "Tournummer Tour": tournummer,
-                "LT SAP": sorted_day_text(sap_days),
-                "LT Tourenplanung": sorted_day_text(tour_days),
-                "Hinweis": _build_hinweis_missing_in_tour(sap_days, tour_days, day_num),
-            })
+        # Kundeninfo aus Tour nehmen falls vorhanden
+        first_tour_row = tour_df[tour_df["SAP Nummer"] == sap].iloc[0] if sap in tour_df["SAP Nummer"].values else None
+        bereich = info.get("bereich", "")
+        blatt = info.get("blatt", "")
+        csb = info.get("csb", "")
+        name = info.get("name", "")
+        strasse = info.get("strasse", "")
+        plz = info.get("plz", "")
+        ort = info.get("ort", "")
+        if first_tour_row is not None:
+            bereich = bereich or value_to_clean_text(first_tour_row.get("Bereich", ""))
+            blatt = blatt or value_to_clean_text(first_tour_row.get("Blatt Tourenplanung", ""))
+            csb = csb or value_to_clean_text(first_tour_row.get("CSB", ""))
+            name = name or value_to_clean_text(first_tour_row.get("Name", ""))
+
+        rows.append({
+            "Prüfung": pruefung,
+            "Bereich": bereich,
+            "Blatt Tourenplanung": blatt,
+            "CSB": csb,
+            "SAP Nummer": sap,
+            "Name": name,
+            "Straße": strasse,
+            "PLZ": plz,
+            "Ort": ort,
+            "LT SAP": sorted_day_text(sap_days),
+            "LT Tourenplanung": sorted_day_text(tour_days),
+            "Gemeinsam": _short_day_list(gemeinsam) if gemeinsam else "–",
+            "Nur in Tour": _day_list_with_tours(nur_tour, sap_tour_nums) if nur_tour else "–",
+            "Nur in SAP": _short_day_list(nur_sap) if nur_sap else "–",
+            "Hinweis": _build_hinweis(sap_days, tour_days),
+        })
 
     return sort_result(pd.DataFrame(rows, columns=result_columns()))
 
@@ -627,11 +614,11 @@ def sort_result(df: pd.DataFrame) -> pd.DataFrame:
         return df if df is not None else pd.DataFrame(columns=result_columns())
     out = df.copy()
     bereich_order = {"NMS": 1, "Malchow": 2, "Direkt": 3}
+    pruef_order = {"Beides": 1, "Fehlt in SAP": 2, "Fehlt in Tour": 3}
     out["_bereich_sort"] = out["Bereich"].map(bereich_order).fillna(99)
+    out["_pruef_sort"] = out["Prüfung"].map(pruef_order).fillna(99)
     out["_sap_sort"] = pd.to_numeric(out["SAP Nummer"], errors="coerce").fillna(9_999_999_999)
-    out["_tag_sort"] = out["Liefertag"].astype(str).str.extract(r"^(\d+)")[0]
-    out["_tag_sort"] = pd.to_numeric(out["_tag_sort"], errors="coerce").fillna(99)
-    out = out.sort_values(["_bereich_sort", "_sap_sort", "_tag_sort", "Tournummer Tour"]).drop(columns=["_bereich_sort", "_sap_sort", "_tag_sort"])
+    out = out.sort_values(["_bereich_sort", "_pruef_sort", "_sap_sort"]).drop(columns=["_bereich_sort", "_pruef_sort", "_sap_sort"])
     return out.reset_index(drop=True)
 
 
@@ -674,44 +661,27 @@ def build_direct_unique_customers(direct_tourkunden: pd.DataFrame) -> pd.DataFra
 # Excel-Ausgabe
 # ---------------------------------------------------------------------------
 
-def _add_count_column(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty:
-        return df
-    if "Liefertag" not in df.columns:
-        return df
-    out = df.copy()
-    out["Anzahl LT"] = 1
-    cols = list(out.columns)
-    cols.remove("Anzahl LT")
-    if "SAP Nummer" in cols:
-        idx = cols.index("SAP Nummer") + 1
-        cols.insert(idx, "Anzahl LT")
-    else:
-        cols.insert(0, "Anzahl LT")
-    return out[cols]
-
-
-
-
-_RIGHT_ALIGN_COLS = {"SAP Nummer", "CSB", "PLZ", "Anzahl LT"}
-_CENTER_ALIGN_COLS = {"Anzahl LT", "Liefertag", "Tournummer Tour", "Quelle", "Bereich", "Liefertag Nr"}
+_RIGHT_ALIGN_COLS = {"SAP Nummer", "CSB", "PLZ"}
+_CENTER_ALIGN_COLS = {"Prüfung", "Bereich", "Quelle", "Liefertag Nr"}
 _COL_WIDTH_HINTS = {
-    "Prüfung": (26, 36),
+    "Prüfung": (14, 16),
     "Bereich": (10, 14),
     "Blatt Tourenplanung": (18, 28),
     "CSB": (10, 12),
     "SAP Nummer": (12, 14),
-    "Anzahl LT": (9, 11),
     "Name": (24, 44),
     "Straße": (20, 34),
     "PLZ": (8, 10),
     "Ort": (18, 30),
-    "Liefertag": (16, 18),
-    "Tournummer Tour": (16, 20),
     "LT SAP": (24, 48),
     "LT Tourenplanung": (24, 48),
+    "Gemeinsam": (16, 30),
+    "Nur in Tour": (20, 48),
+    "Nur in SAP": (16, 30),
     "Hinweis": (30, 58),
     "Quelle": (16, 24),
+    "Liefertag": (16, 18),
+    "Tournummer Tour": (16, 20),
     "Gefundene Touren": (18, 28),
 }
 
@@ -727,12 +697,14 @@ _BEREICH_FILL_ZEBRA = {
     "Direkt":  PatternFill(start_color="FFF8CBAD", end_color="FFF8CBAD", fill_type="solid"),   # orange
 }
 _PRUEFUNG_FILL = {
-    "Fehlt in SAP / zu viel in Tour": PatternFill(start_color="FFFFF2CC", end_color="FFFFF2CC", fill_type="solid"),  # gelb
-    "Fehlt in Tour / zu viel in SAP": PatternFill(start_color="FFFCE4EC", end_color="FFFCE4EC", fill_type="solid"),  # rosa
+    "Fehlt in SAP": PatternFill(start_color="FFFFF2CC", end_color="FFFFF2CC", fill_type="solid"),  # gelb
+    "Fehlt in Tour": PatternFill(start_color="FFFCE4EC", end_color="FFFCE4EC", fill_type="solid"),  # rosa
+    "Beides": PatternFill(start_color="FFFFE0B2", end_color="FFFFE0B2", fill_type="solid"),  # orange
 }
 _PRUEFUNG_FONT = {
-    "Fehlt in SAP / zu viel in Tour": Font(name="Calibri", size=10, bold=True, color="FF7F6000"),
-    "Fehlt in Tour / zu viel in SAP": Font(name="Calibri", size=10, bold=True, color="FFC00000"),
+    "Fehlt in SAP": Font(name="Calibri", size=10, bold=True, color="FF7F6000"),
+    "Fehlt in Tour": Font(name="Calibri", size=10, bold=True, color="FFC00000"),
+    "Beides": Font(name="Calibri", size=10, bold=True, color="FFE65100"),
 }
 _DEFAULT_ZEBRA = PatternFill(start_color="FFF2F2F2", end_color="FFF2F2F2", fill_type="solid")
 
@@ -857,9 +829,10 @@ def _write_summary_sheet(writer, counts: Dict[str, int], selected_sheets: Dict[s
         ("  davon Malchow", counts.get("malchow", 0)),
         ("  davon Direkt (Tourkunden)", counts.get("direkt", 0)),
         ("", ""),
-        ("Fehlt in SAP / zu viel in Tour", counts.get("missing_sap", 0)),
-        ("Fehlt in Tour / zu viel in SAP", counts.get("missing_tour", 0)),
-        ("Unterschiede gesamt", counts.get("all_diff", 0)),
+        ("Kunden mit Abweichungen", counts.get("kunden_mit_diff", 0)),
+        ("  davon Fehlt in SAP", counts.get("kunden_fehlt_sap", 0)),
+        ("  davon Fehlt in Tour", counts.get("kunden_fehlt_tour", 0)),
+        ("  davon Beides", counts.get("kunden_beides", 0)),
         ("", ""),
         ("Direkt: einmalige Kunden", counts.get("direct_unique", 0)),
     ]
@@ -917,19 +890,21 @@ def _write_summary_sheet(writer, counts: Dict[str, int], selected_sheets: Dict[s
 
 def build_excel(
     all_diff: pd.DataFrame,
-    missing_sap: pd.DataFrame,
-    missing_tour: pd.DataFrame,
     tour_scope: pd.DataFrame,
     direct_tourkunden: pd.DataFrame,
     direct_unique: pd.DataFrame,
     selected_sheets: Optional[Dict[str, str]] = None,
 ) -> bytes:
+    # Gefilterte Ansichten
+    missing_sap = all_diff[all_diff["Prüfung"].isin({"Fehlt in SAP", "Beides"})].copy() if not all_diff.empty else pd.DataFrame(columns=result_columns())
+    missing_tour = all_diff[all_diff["Prüfung"].isin({"Fehlt in Tour", "Beides"})].copy() if not all_diff.empty else pd.DataFrame(columns=result_columns())
+
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         sheets = [
-            ("Alle Unterschiede", _add_count_column(all_diff), True),
-            ("Fehlt in SAP", _add_count_column(missing_sap), True),
-            ("Fehlt in Tour", _add_count_column(missing_tour), True),
+            ("Alle Unterschiede", all_diff, True),
+            ("Fehlt in SAP", missing_sap, True),
+            ("Fehlt in Tour", missing_tour, True),
             ("Geprüfter Tourbereich", tour_scope[tour_scope_columns()] if not tour_scope.empty else pd.DataFrame(columns=tour_scope_columns()), True),
             ("Direkt Tourkunden", direct_tourkunden, True),
             ("Direkt Kunden", direct_unique, False),
@@ -944,9 +919,10 @@ def build_excel(
             "nms": int((tour_scope["Bereich"] == "NMS").sum()) if not tour_scope.empty and "Bereich" in tour_scope.columns else 0,
             "malchow": int((tour_scope["Bereich"] == "Malchow").sum()) if not tour_scope.empty and "Bereich" in tour_scope.columns else 0,
             "direkt": int((tour_scope["Bereich"] == "Direkt").sum()) if not tour_scope.empty and "Bereich" in tour_scope.columns else 0,
-            "missing_sap": len(missing_sap),
-            "missing_tour": len(missing_tour),
-            "all_diff": len(all_diff),
+            "kunden_mit_diff": len(all_diff),
+            "kunden_fehlt_sap": len(missing_sap),
+            "kunden_fehlt_tour": len(missing_tour),
+            "kunden_beides": int((all_diff["Prüfung"] == "Beides").sum()) if not all_diff.empty else 0,
             "direct_unique": len(direct_unique),
         }
         _write_summary_sheet(writer, counts, selected_sheets or {})
@@ -1015,10 +991,7 @@ if run:
         # Wichtiger Filter: SAP-Rückrichtung nur für den tatsächlich geprüften Tourbereich.
         days_by_sap_scoped = {sap: days for sap, days in days_by_sap.items() if sap in selected_saps}
 
-        missing_sap = build_missing_in_sap(tour_scope, days_by_sap_scoped)
-        missing_tour = build_missing_in_tour(tour_scope, days_by_sap_scoped, customer_info)
-        all_diff = pd.concat([missing_sap, missing_tour], ignore_index=True) if not missing_sap.empty or not missing_tour.empty else pd.DataFrame(columns=result_columns())
-        all_diff = sort_result(all_diff)
+        all_diff = build_differences(tour_scope, days_by_sap_scoped, customer_info)
 
         direct_tourkunden = build_direct_tourkunden(tour_scope)
         direct_unique = build_direct_unique_customers(direct_tourkunden)
@@ -1032,15 +1005,13 @@ if run:
                 st.dataframe(bad_direct, use_container_width=True, hide_index=True)
                 st.stop()
 
-        excel_bytes = build_excel(all_diff, missing_sap, missing_tour, tour_scope, direct_tourkunden, direct_unique, selected_sheets)
+        excel_bytes = build_excel(all_diff, tour_scope, direct_tourkunden, direct_unique, selected_sheets)
 
         st.session_state["result"] = {
             "sap_sheet": sap_sheet,
             "sap_rows": sap_rows,
             "selected_sheets": selected_sheets,
             "tour_scope": tour_scope,
-            "missing_sap": missing_sap,
-            "missing_tour": missing_tour,
             "all_diff": all_diff,
             "direct_tourkunden": direct_tourkunden,
             "direct_unique": direct_unique,
@@ -1070,11 +1041,15 @@ if result:
             use_container_width=True,
         )
 
+    diff = result["all_diff"]
+    n_fehlt_sap = int((diff["Prüfung"].isin({"Fehlt in SAP", "Beides"})).sum()) if not diff.empty else 0
+    n_fehlt_tour = int((diff["Prüfung"].isin({"Fehlt in Tour", "Beides"})).sum()) if not diff.empty else 0
+
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Geprüfte Tour-Zeilen", len(result["tour_scope"]))
-    c2.metric("Direkt Tourkunden", len(result["direct_unique"]))
-    c3.metric("Fehlt in SAP", len(result["missing_sap"]))
-    c4.metric("Fehlt in Tour", len(result["missing_tour"]))
+    c2.metric("Kunden mit Abweichungen", len(diff))
+    c3.metric("Fehlt in SAP", n_fehlt_sap)
+    c4.metric("Fehlt in Tour", n_fehlt_tour)
 
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "Alle Unterschiede",
@@ -1085,11 +1060,11 @@ if result:
     ])
 
     with tab1:
-        st.dataframe(_add_count_column(result["all_diff"]), use_container_width=True, hide_index=True)
+        st.dataframe(diff, use_container_width=True, hide_index=True)
     with tab2:
-        st.dataframe(_add_count_column(result["missing_sap"]), use_container_width=True, hide_index=True)
+        st.dataframe(diff[diff["Prüfung"].isin({"Fehlt in SAP", "Beides"})] if not diff.empty else diff, use_container_width=True, hide_index=True)
     with tab3:
-        st.dataframe(_add_count_column(result["missing_tour"]), use_container_width=True, hide_index=True)
+        st.dataframe(diff[diff["Prüfung"].isin({"Fehlt in Tour", "Beides"})] if not diff.empty else diff, use_container_width=True, hide_index=True)
     with tab4:
         st.dataframe(result["tour_scope"][tour_scope_columns()] if not result["tour_scope"].empty else result["tour_scope"], use_container_width=True, hide_index=True)
     with tab5:
