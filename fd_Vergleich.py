@@ -1,4 +1,5 @@
 import io
+import re
 from typing import Dict, List, Optional, Set, Tuple
 
 import pandas as pd
@@ -35,12 +36,28 @@ SAP_COL_INDEX = 0
 SAP_DAY_COL_INDEX = 6
 TOUR_SAP_COL_INDEX = 1
 
-# Es werden nur diese vier Blätter der Tourenplanung geprüft.
-TOUR_SHEET_CANDIDATES = [
-    "DIREKT",
-    "MK",
-    "HUPA_NMS",
-    "HUPA_MALCHOW",
+# Es werden nur diese Bereiche geprüft:
+# - NMS komplett
+# - Malchow komplett
+# - Direkt nur mit den genannten Tournummern
+DIRECT_TOURS: Set[str] = {"1058", "2058", "3058", "4058", "5058", "6030"}
+
+TOUR_SHEET_RULES = [
+    {
+        "bereich": "NMS",
+        "candidates": ["NMS", "HUPA_NMS", "HUPA NMS", "HUPA-NMS", "HuPa NMS"],
+        "direct_filter": False,
+    },
+    {
+        "bereich": "Malchow",
+        "candidates": ["Malchow", "HUPA_MALCHOW", "HUPA MALCHOW", "HUPA-MALCHOW", "HuPa Malchow"],
+        "direct_filter": False,
+    },
+    {
+        "bereich": "Direkt",
+        "candidates": ["DIREKT", "Direkt"],
+        "direct_filter": True,
+    },
 ]
 
 DAY_COLUMN_CANDIDATES = {
@@ -167,28 +184,47 @@ def read_excel_with_detected_header(excel: pd.ExcelFile, sheet_name: str) -> pd.
     return df
 
 
-def select_tour_sheet_names(excel: pd.ExcelFile) -> Tuple[List[str], List[str]]:
-    """Wählt die vier echten Blätter der Tourenplanung aus."""
+def select_tour_sheet_rules(excel: pd.ExcelFile) -> Tuple[List[dict], List[str]]:
+    """Findet die Blätter NMS, Malchow und Direkt anhand robuster Namensvarianten."""
     available_by_normalized = {normalize_header_name(name): name for name in excel.sheet_names}
-    selected: List[str] = []
+    selected: List[dict] = []
     missing: List[str] = []
 
-    for expected in TOUR_SHEET_CANDIDATES:
-        real_name = available_by_normalized.get(normalize_header_name(expected))
-        if real_name and real_name not in selected:
-            selected.append(real_name)
+    for rule in TOUR_SHEET_RULES:
+        real_name: Optional[str] = None
+        for candidate in rule["candidates"]:
+            normalized = normalize_header_name(candidate)
+            if normalized in available_by_normalized:
+                real_name = available_by_normalized[normalized]
+                break
+
+        # Fallback: enthält der Blattname den Suchbegriff?
+        if real_name is None:
+            for normalized_name, original_name in available_by_normalized.items():
+                if rule["bereich"] == "NMS" and "nms" in normalized_name:
+                    real_name = original_name
+                    break
+                if rule["bereich"] == "Malchow" and "malchow" in normalized_name:
+                    real_name = original_name
+                    break
+                if rule["bereich"] == "Direkt" and normalized_name == "direkt":
+                    real_name = original_name
+                    break
+
+        if real_name:
+            selected.append({
+                "sheet_name": real_name,
+                "bereich": rule["bereich"],
+                "direct_filter": bool(rule["direct_filter"]),
+            })
         else:
-            missing.append(expected)
+            missing.append(rule["bereich"])
 
-    if selected:
-        return selected, missing
-
-    # Fallback: falls die Datei anders benannt wurde, werden die ersten vier Blätter geprüft.
-    return excel.sheet_names[:4], TOUR_SHEET_CANDIDATES
+    return selected, missing
 
 
 def day_value_is_set(value) -> bool:
-    """Ein Tag gilt als vorhanden, wenn in Mo bis Sam ein echter Wert steht."""
+    """Ein Tag gilt als vorhanden, wenn in Montag bis Samstag ein echter Wert steht."""
     if value is None or pd.isna(value):
         return False
     text = str(value).strip()
@@ -200,6 +236,30 @@ def day_value_is_set(value) -> bool:
     if pd.notna(number) and float(number) == 0:
         return False
     return True
+
+
+def normalize_tour_display(value) -> str:
+    """Schreibt Tournummern ohne .0, lässt Textwerte wie 22+3 aber stehen."""
+    if value is None or pd.isna(value):
+        return ""
+    number = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+    if pd.notna(number) and float(number).is_integer():
+        return str(int(number))
+    return str(value).strip()
+
+
+def extract_tour_numbers(value) -> Set[str]:
+    """Extrahiert Tournummern aus einer Zelle. Wichtig für den Direkt-Filter."""
+    if value is None or pd.isna(value):
+        return set()
+
+    number = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+    if pd.notna(number) and float(number).is_integer():
+        return {str(int(number))}
+
+    text = str(value).strip()
+    found = set(re.findall(r"\d+", text))
+    return found
 
 
 def normalize_day_code_series(series: pd.Series) -> pd.Series:
@@ -223,6 +283,19 @@ def merge_customer_info(base: Dict[str, Dict[str, str]], sap: str, info: Dict[st
     for key in ["name", "strasse", "ort"]:
         if not target.get(key) and info.get(key):
             target[key] = info[key]
+
+
+def days_to_text(days: Set[int] | List[int]) -> str:
+    return ", ".join(f"{d} {DAY_NAMES[d]}" for d in sorted(days))
+
+
+def day_to_text(day: int) -> str:
+    return f"{day} {DAY_NAMES[day]}"
+
+
+def join_unique(values) -> str:
+    cleaned = [value_to_clean_text(v) for v in values if value_to_clean_text(v)]
+    return ", ".join(sorted(set(cleaned)))
 
 
 # ---------------------------------------------------------------------------
@@ -275,14 +348,18 @@ def read_sap_file(uploaded_file) -> Tuple[Dict[str, Set[int]], str, int]:
 
 
 def read_tourenplanung(uploaded_file) -> Tuple[pd.DataFrame, List[str], List[str], Dict[str, Dict[str, str]]]:
-    """Liest nur die vier Blätter DIREKT, MK, HUPA_NMS und HUPA_MALCHOW."""
+    """Liest NMS und Malchow komplett, aus Direkt nur die definierten Tournummern."""
     excel = pd.ExcelFile(uploaded_file)
-    sheet_names, missing_sheet_names = select_tour_sheet_names(excel)
+    selected_rules, missing_sheet_names = select_tour_sheet_rules(excel)
 
     frames: List[pd.DataFrame] = []
     customer_info: Dict[str, Dict[str, str]] = {}
 
-    for sheet_name in sheet_names:
+    for sheet_rule in selected_rules:
+        sheet_name = sheet_rule["sheet_name"]
+        bereich = sheet_rule["bereich"]
+        direct_filter = sheet_rule["direct_filter"]
+
         df = read_excel_with_detected_header(excel, sheet_name)
         if df.empty:
             continue
@@ -369,24 +446,35 @@ def read_tourenplanung(uploaded_file) -> Tuple[pd.DataFrame, List[str], List[str
         if not day_value_columns:
             continue
 
-        work["blatt"] = sheet_name
+        work["Bereich"] = bereich
+        work["Blatt Tourenplanung"] = sheet_name
         long = work.melt(
-            id_vars=["sap", "blatt"],
+            id_vars=["sap", "Bereich", "Blatt Tourenplanung"],
             value_vars=day_value_columns,
             var_name="tag_col",
             value_name="wert",
         )
         long["tag_num"] = long["tag_col"].str.replace("tag_", "", regex=False).astype(int)
         long["wert_gesetzt"] = long["wert"].map(day_value_is_set)
+        long["Tournummer"] = long["wert"].map(normalize_tour_display)
 
-        long = long[long["sap"].ne("") & long["wert_gesetzt"]]
-        frames.append(long[["sap", "blatt", "tag_num", "wert"]])
+        long = long[long["sap"].ne("") & long["wert_gesetzt"]].copy()
+
+        if direct_filter:
+            long["tournummer_set"] = long["wert"].map(extract_tour_numbers)
+            long = long[long["tournummer_set"].map(lambda values: bool(values & DIRECT_TOURS))].copy()
+            long = long.drop(columns=["tournummer_set"], errors="ignore")
+
+        if not long.empty:
+            frames.append(long[["sap", "Bereich", "Blatt Tourenplanung", "tag_num", "Tournummer"]])
+
+    checked_sheets = [rule["sheet_name"] for rule in selected_rules]
 
     if not frames:
-        empty = pd.DataFrame(columns=["sap", "blatt", "tag_num", "wert"])
-        return empty, sheet_names, missing_sheet_names, customer_info
+        empty = pd.DataFrame(columns=["sap", "Bereich", "Blatt Tourenplanung", "tag_num", "Tournummer"])
+        return empty, checked_sheets, missing_sheet_names, customer_info
 
-    return pd.concat(frames, ignore_index=True), sheet_names, missing_sheet_names, customer_info
+    return pd.concat(frames, ignore_index=True), checked_sheets, missing_sheet_names, customer_info
 
 
 # ---------------------------------------------------------------------------
@@ -394,20 +482,19 @@ def read_tourenplanung(uploaded_file) -> Tuple[pd.DataFrame, List[str], List[str
 # ---------------------------------------------------------------------------
 
 
-def days_to_text(days: Set[int] | List[int]) -> str:
-    return ", ".join(f"{d} {DAY_NAMES[d]}" for d in sorted(days))
-
-
 def _export_columns() -> List[str]:
     return [
+        "Bereich",
         "Blatt Tourenplanung",
+        "Tournummer",
         "SAP Nummer",
         "Name",
         "Straße",
         "Ort",
-        "Fehlende LT",
+        "Liefertag",
         "LT SAP",
         "LT Tourenplanung",
+        "Hinweis",
     ]
 
 
@@ -415,50 +502,75 @@ def _empty_result_df() -> pd.DataFrame:
     return pd.DataFrame(columns=_export_columns())
 
 
+def build_tour_day_overview(tour_df: pd.DataFrame) -> pd.DataFrame:
+    """Eine Zeile je SAP und Liefertag aus dem ausgewählten Tourbereich."""
+    if tour_df.empty:
+        return pd.DataFrame(columns=["sap", "tag_num", "Bereich", "Blatt Tourenplanung", "Tournummer"])
+
+    return tour_df.groupby(["sap", "tag_num"], as_index=False).agg(
+        Bereich=("Bereich", join_unique),
+        **{"Blatt Tourenplanung": ("Blatt Tourenplanung", join_unique)},
+        Tournummer=("Tournummer", join_unique),
+    )
+
+
+def build_sap_day_overview(days_by_sap: Dict[str, Set[int]]) -> pd.DataFrame:
+    rows = []
+    for sap, days in days_by_sap.items():
+        for day in sorted(days):
+            rows.append({"sap": sap, "tag_num": day})
+    if not rows:
+        return pd.DataFrame(columns=["sap", "tag_num"])
+    return pd.DataFrame(rows)
+
+
+def add_common_result_columns(
+    df: pd.DataFrame,
+    days_by_sap: Dict[str, Set[int]],
+    days_in_tour: Dict[str, Set[int]],
+    customer_info: Dict[str, Dict[str, str]],
+    hinweis: str,
+) -> pd.DataFrame:
+    if df.empty:
+        return _empty_result_df()
+
+    out = df.copy()
+    out["SAP Nummer"] = out["sap"]
+    out["Name"] = out["sap"].map(lambda s: customer_info.get(s, {}).get("name", ""))
+    out["Straße"] = out["sap"].map(lambda s: customer_info.get(s, {}).get("strasse", ""))
+    out["Ort"] = out["sap"].map(lambda s: customer_info.get(s, {}).get("ort", ""))
+    out["Liefertag"] = out["tag_num"].map(day_to_text)
+    out["LT SAP"] = out["sap"].map(lambda s: days_to_text(days_by_sap.get(s, set())) or "(keine hinterlegt)")
+    out["LT Tourenplanung"] = out["sap"].map(lambda s: days_to_text(days_in_tour.get(s, set())) or "(nicht gesetzt)")
+    out["Hinweis"] = hinweis
+    out["_SapSort"] = pd.to_numeric(out["sap"], errors="coerce").fillna(9_999_999_999)
+    out = out.sort_values(["Bereich", "Blatt Tourenplanung", "_SapSort", "tag_num"]).reset_index(drop=True)
+    return out[_export_columns()]
+
+
 def build_missing_in_sap(
     tour_df: pd.DataFrame,
     days_by_sap: Dict[str, Set[int]],
     customer_info: Dict[str, Dict[str, str]],
 ) -> pd.DataFrame:
-    """Tage stehen in der Tourenplanung, fehlen aber in SAP."""
+    """Tage stehen in der ausgewählten Tourenplanung, fehlen aber in SAP."""
     if tour_df.empty:
         return _empty_result_df()
 
-    known = tour_df[tour_df["sap"].ne("")].copy()
-    if known.empty:
-        return _empty_result_df()
-
-    known["fehlt"] = known.apply(
-        lambda row: row["tag_num"] not in days_by_sap.get(row["sap"], set()),
-        axis=1,
-    )
-    missing = known[known["fehlt"]]
-    if missing.empty:
-        return _empty_result_df()
-
+    tour_days = build_tour_day_overview(tour_df)
     days_in_tour: Dict[str, Set[int]] = tour_df.groupby("sap")["tag_num"].agg(set).to_dict()
-    sheets_by_sap: Dict[str, str] = tour_df.groupby("sap")["blatt"].agg(
-        lambda x: ", ".join(sorted(set(map(str, x))))
-    ).to_dict()
 
-    agg = missing.groupby("sap", as_index=False).agg(
-        tage=("tag_num", lambda x: sorted(set(x))),
+    missing = tour_days[
+        tour_days.apply(lambda row: row["tag_num"] not in days_by_sap.get(row["sap"], set()), axis=1)
+    ].copy()
+
+    return add_common_result_columns(
+        missing,
+        days_by_sap,
+        days_in_tour,
+        customer_info,
+        "In der Tourenplanung vorhanden, in SAP nicht als Liefertag hinterlegt.",
     )
-
-    agg["Blatt Tourenplanung"] = agg["sap"].map(lambda s: sheets_by_sap.get(s, ""))
-    agg["Name"] = agg["sap"].map(lambda s: customer_info.get(s, {}).get("name", ""))
-    agg["Straße"] = agg["sap"].map(lambda s: customer_info.get(s, {}).get("strasse", ""))
-    agg["Ort"] = agg["sap"].map(lambda s: customer_info.get(s, {}).get("ort", ""))
-    agg["Fehlende LT"] = agg["tage"].map(days_to_text)
-    agg["LT SAP"] = agg["sap"].map(lambda s: days_to_text(days_by_sap.get(s, set())) or "(keine hinterlegt)")
-    agg["LT Tourenplanung"] = agg["sap"].map(lambda s: days_to_text(days_in_tour.get(s, set())))
-    agg["_SapSort"] = pd.to_numeric(agg["sap"], errors="coerce").fillna(9_999_999_999)
-
-    agg = agg.rename(columns={"sap": "SAP Nummer"}).sort_values(
-        ["Blatt Tourenplanung", "_SapSort"]
-    ).reset_index(drop=True)
-
-    return agg[_export_columns()]
 
 
 def build_missing_in_tour(
@@ -466,78 +578,72 @@ def build_missing_in_tour(
     days_by_sap: Dict[str, Set[int]],
     customer_info: Dict[str, Dict[str, str]],
 ) -> pd.DataFrame:
-    """Tage stehen in SAP, fehlen aber in der Tourenplanung."""
-    days_in_tour: Dict[str, Set[int]] = {}
-    sheets_by_sap: Dict[str, str] = {}
+    """Tage stehen in SAP, fehlen aber im ausgewählten Tourbereich.
 
-    if not tour_df.empty:
-        days_in_tour = tour_df.groupby("sap")["tag_num"].agg(set).to_dict()
-        sheets_by_sap = tour_df.groupby("sap")["blatt"].agg(
-            lambda x: ", ".join(sorted(set(map(str, x))))
-        ).to_dict()
+    Wichtig: Es werden nur SAP-Nummern geprüft, die im ausgewählten Tourbereich
+    überhaupt vorkommen. Dadurch laufen keine fremden Bereiche aus der SAP-Datei
+    als Fehler ein.
+    """
+    if tour_df.empty:
+        return _empty_result_df()
+
+    tour_days = build_tour_day_overview(tour_df)
+    days_in_tour: Dict[str, Set[int]] = tour_df.groupby("sap")["tag_num"].agg(set).to_dict()
+    tour_meta = tour_df.groupby("sap", as_index=False).agg(
+        Bereich=("Bereich", join_unique),
+        **{"Blatt Tourenplanung": ("Blatt Tourenplanung", join_unique)},
+    )
+    tour_meta_by_sap = tour_meta.set_index("sap").to_dict(orient="index")
 
     rows: List[dict] = []
-    for sap, sap_days in days_by_sap.items():
-        tour_days = days_in_tour.get(sap, set())
-        fehlend = sorted(sap_days - tour_days)
-        if not fehlend:
+    relevant_saps = sorted(set(tour_df["sap"]))
+    for sap in relevant_saps:
+        sap_days = days_by_sap.get(sap, set())
+        tour_day_set = days_in_tour.get(sap, set())
+        missing_days = sorted(sap_days - tour_day_set)
+        if not missing_days:
             continue
-
-        info = customer_info.get(sap, {})
-        rows.append({
-            "Blatt Tourenplanung": sheets_by_sap.get(sap, "(nicht in Tourenplanung vorhanden)"),
-            "SAP Nummer": sap,
-            "Name": info.get("name", ""),
-            "Straße": info.get("strasse", ""),
-            "Ort": info.get("ort", ""),
-            "Fehlende LT": days_to_text(fehlend),
-            "LT SAP": days_to_text(sap_days),
-            "LT Tourenplanung": days_to_text(tour_days) or "(nicht in Tourenplanung vorhanden)",
-            "_SapSort": int(sap) if sap.isdigit() else 9_999_999_999,
-        })
+        meta = tour_meta_by_sap.get(sap, {})
+        for day in missing_days:
+            rows.append({
+                "sap": sap,
+                "tag_num": day,
+                "Bereich": meta.get("Bereich", ""),
+                "Blatt Tourenplanung": meta.get("Blatt Tourenplanung", ""),
+                "Tournummer": "(fehlt in Tour)",
+            })
 
     if not rows:
         return _empty_result_df()
 
-    df = pd.DataFrame(rows)
-    df = df.sort_values(["Blatt Tourenplanung", "_SapSort"]).reset_index(drop=True)
-    return df[_export_columns()]
+    missing = pd.DataFrame(rows)
+    return add_common_result_columns(
+        missing,
+        days_by_sap,
+        days_in_tour,
+        customer_info,
+        "In SAP vorhanden, im ausgewählten Tourbereich aber nicht gesetzt.",
+    )
 
 
-def _add_count_column(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None:
-        return df
-
-    out = df.copy()
-    if "Fehlende LT" in out.columns:
-        out["Anzahl LT"] = out["Fehlende LT"].fillna("").map(
-            lambda s: len([t for t in str(s).split(",") if t.strip()])
-        )
-    else:
-        out["Anzahl LT"] = 0
-
-    cols = list(out.columns)
-    cols.remove("Anzahl LT")
-    if "SAP Nummer" in cols:
-        idx = cols.index("SAP Nummer") + 1
-        cols.insert(idx, "Anzahl LT")
-    else:
-        cols.insert(0, "Anzahl LT")
-    return out[cols]
-
-
-def _filter_dataframe(df: pd.DataFrame, suche: str, blatt: str = "Alle") -> pd.DataFrame:
+def _filter_dataframe(df: pd.DataFrame, suche: str, bereich: str = "Alle") -> pd.DataFrame:
     if df is None or df.empty:
         return df
 
     work = df
-    if blatt and blatt != "Alle" and "Blatt Tourenplanung" in work.columns:
-        work = work[work["Blatt Tourenplanung"].astype(str).str.contains(blatt, na=False, regex=False)]
+    if bereich and bereich != "Alle" and "Bereich" in work.columns:
+        work = work[work["Bereich"].astype(str).str.contains(bereich, na=False, regex=False)]
 
     if suche:
         such = suche.strip().lower()
         if such:
-            spalten = [c for c in ["Blatt Tourenplanung", "SAP Nummer", "Name", "Straße", "Ort"] if c in work.columns]
+            spalten = [
+                c for c in [
+                    "Bereich", "Blatt Tourenplanung", "Tournummer", "SAP Nummer",
+                    "Name", "Straße", "Ort", "Liefertag", "LT SAP", "LT Tourenplanung", "Hinweis"
+                ]
+                if c in work.columns
+            ]
             mask = pd.Series(False, index=work.index)
             for c in spalten:
                 mask = mask | work[c].astype(str).str.lower().str.contains(such, na=False)
@@ -546,20 +652,18 @@ def _filter_dataframe(df: pd.DataFrame, suche: str, blatt: str = "Alle") -> pd.D
     return work
 
 
-def build_overview(missing_sap: pd.DataFrame, missing_tour: pd.DataFrame) -> pd.DataFrame:
+def build_overview(missing_sap: pd.DataFrame, missing_tour: pd.DataFrame, tour_df: pd.DataFrame) -> pd.DataFrame:
     rows = []
-    for sheet_name in TOUR_SHEET_CANDIDATES:
+    for bereich in ["NMS", "Malchow", "Direkt"]:
+        selected_rows = int((tour_df["Bereich"] == bereich).sum()) if not tour_df.empty else 0
+        selected_customers = int(tour_df.loc[tour_df["Bereich"] == bereich, "sap"].nunique()) if not tour_df.empty else 0
         rows.append({
-            "Blatt": sheet_name,
-            "Fehlt in SAP": int(missing_sap["Blatt Tourenplanung"].astype(str).str.contains(sheet_name, na=False, regex=False).sum()) if not missing_sap.empty else 0,
-            "Fehlt in Tour": int(missing_tour["Blatt Tourenplanung"].astype(str).str.contains(sheet_name, na=False, regex=False).sum()) if not missing_tour.empty else 0,
+            "Bereich": bereich,
+            "Geprüfte Tour-Zeilen": selected_rows,
+            "Geprüfte SAP-Nummern": selected_customers,
+            "Fehlt in SAP": int((missing_sap["Bereich"].astype(str).str.contains(bereich, na=False, regex=False)).sum()) if not missing_sap.empty else 0,
+            "Fehlt in Tour": int((missing_tour["Bereich"].astype(str).str.contains(bereich, na=False, regex=False)).sum()) if not missing_tour.empty else 0,
         })
-
-    rows.append({
-        "Blatt": "Nicht in Tourenplanung vorhanden",
-        "Fehlt in SAP": 0,
-        "Fehlt in Tour": int(missing_tour["Blatt Tourenplanung"].astype(str).str.contains("nicht in Tourenplanung", case=False, na=False, regex=False).sum()) if not missing_tour.empty else 0,
-    })
     return pd.DataFrame(rows)
 
 
@@ -572,33 +676,30 @@ def build_excel(missing_sap: pd.DataFrame, missing_tour: pd.DataFrame) -> bytes:
     """Schreibt eine Excel mit allen Unterschieden und beiden Einzelrichtungen."""
     output = io.BytesIO()
 
-    missing_sap_out = _add_count_column(missing_sap)
-    missing_tour_out = _add_count_column(missing_tour)
-
     all_parts = []
-    if missing_sap_out is not None and not missing_sap_out.empty:
-        part = missing_sap_out.copy()
-        part.insert(0, "Prüfung", "Fehlt in SAP")
+    if missing_sap is not None and not missing_sap.empty:
+        part = missing_sap.copy()
+        part.insert(0, "Prüfung", "Fehlt in SAP / zu viel in Tour")
         all_parts.append(part)
-    if missing_tour_out is not None and not missing_tour_out.empty:
-        part = missing_tour_out.copy()
-        part.insert(0, "Prüfung", "Fehlt in Tour")
+    if missing_tour is not None and not missing_tour.empty:
+        part = missing_tour.copy()
+        part.insert(0, "Prüfung", "Fehlt in Tour / zu viel in SAP")
         all_parts.append(part)
 
     if all_parts:
         all_out = pd.concat(all_parts, ignore_index=True)
     else:
-        all_out = pd.DataFrame(columns=["Prüfung"] + list(_add_count_column(_empty_result_df()).columns))
+        all_out = pd.DataFrame(columns=["Prüfung"] + _export_columns())
 
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         all_out.to_excel(writer, index=False, sheet_name="Alle Unterschiede", na_rep="")
         _format_sheet(writer, "Alle Unterschiede", all_out)
 
-        missing_sap_out.to_excel(writer, index=False, sheet_name="Fehlt in SAP", na_rep="")
-        _format_sheet(writer, "Fehlt in SAP", missing_sap_out)
+        missing_sap.to_excel(writer, index=False, sheet_name="Fehlt in SAP", na_rep="")
+        _format_sheet(writer, "Fehlt in SAP", missing_sap)
 
-        missing_tour_out.to_excel(writer, index=False, sheet_name="Fehlt in Tour", na_rep="")
-        _format_sheet(writer, "Fehlt in Tour", missing_tour_out)
+        missing_tour.to_excel(writer, index=False, sheet_name="Fehlt in Tour", na_rep="")
+        _format_sheet(writer, "Fehlt in Tour", missing_tour)
 
         wb = writer.book
         for ws in wb.worksheets:
@@ -607,19 +708,21 @@ def build_excel(missing_sap: pd.DataFrame, missing_tour: pd.DataFrame) -> bytes:
     return output.getvalue()
 
 
-_RIGHT_ALIGN_COLS = {"SAP Nummer", "Anzahl LT"}
+_RIGHT_ALIGN_COLS = {"SAP Nummer"}
 
 _COL_WIDTH_HINTS = {
-    "Prüfung": (14, 18),
+    "Prüfung": (22, 32),
+    "Bereich": (10, 16),
     "Blatt Tourenplanung": (18, 34),
+    "Tournummer": (12, 22),
     "SAP Nummer": (10, 12),
-    "Anzahl LT": (10, 11),
     "Name": (24, 42),
     "Straße": (20, 32),
     "Ort": (22, 36),
-    "Fehlende LT": (24, 48),
+    "Liefertag": (16, 22),
     "LT SAP": (24, 48),
     "LT Tourenplanung": (24, 48),
+    "Hinweis": (36, 65),
 }
 
 
@@ -642,7 +745,6 @@ def _format_sheet(writer, sheet_name: str, df: pd.DataFrame) -> None:
     body_font = Font(name="Calibri", size=11)
     align_left = Alignment(horizontal="left", vertical="center", wrap_text=False)
     align_right = Alignment(horizontal="right", vertical="center", wrap_text=False)
-    align_center = Alignment(horizontal="center", vertical="center", wrap_text=False)
 
     for col_idx in range(1, n_cols + 1):
         cell = ws.cell(row=1, column=col_idx)
@@ -653,7 +755,7 @@ def _format_sheet(writer, sheet_name: str, df: pd.DataFrame) -> None:
     ws.row_dimensions[1].height = 24
 
     columns = list(df.columns)
-    group_column = "Prüfung" if "Prüfung" in columns else "Blatt Tourenplanung"
+    group_column = "Prüfung" if "Prüfung" in columns else "Bereich"
     group_idx = columns.index(group_column) if group_column in columns else None
     group_values = df[group_column].astype(str).tolist() if group_idx is not None and n_rows > 0 else []
 
@@ -669,17 +771,9 @@ def _format_sheet(writer, sheet_name: str, df: pd.DataFrame) -> None:
         for col_idx, col_name in enumerate(columns, start=1):
             cell = ws.cell(row=excel_row, column=col_idx)
             cell.font = body_font
-
-            if col_name == "Anzahl LT":
-                cell.alignment = align_center
-            elif col_name in _RIGHT_ALIGN_COLS:
-                cell.alignment = align_right
-            else:
-                cell.alignment = align_left
-
+            cell.alignment = align_right if col_name in _RIGHT_ALIGN_COLS else align_left
             if is_zebra:
                 cell.fill = zebra_fill
-
             top_side = medium if new_group else thin
             cell.border = Border(left=thin, right=thin, top=top_side, bottom=thin)
 
@@ -694,17 +788,6 @@ def _format_sheet(writer, sheet_name: str, df: pd.DataFrame) -> None:
     if n_rows > 0 and n_cols > 0:
         last_col = get_column_letter(n_cols)
         ws.auto_filter.ref = f"A1:{last_col}{n_rows + 1}"
-
-    if "Anzahl LT" in columns and n_rows > 0:
-        from openpyxl.formatting.rule import ColorScaleRule
-        col_letter = get_column_letter(columns.index("Anzahl LT") + 1)
-        rng = f"{col_letter}2:{col_letter}{n_rows + 1}"
-        rule = ColorScaleRule(
-            start_type="num", start_value=1, start_color="FFE2F0D9",
-            mid_type="num", mid_value=3, mid_color="FFFFF2CC",
-            end_type="num", end_value=6, end_color="FFF4B084",
-        )
-        ws.conditional_formatting.add(rng, rule)
 
     try:
         ws.page_setup.orientation = ws.ORIENTATION_LANDSCAPE
@@ -731,7 +814,8 @@ st.markdown(
         [data-testid="stMetric"] { background: #f7f8fa; border: 1px solid #e3e7ee; border-radius: 14px; padding: 14px 16px; }
         [data-testid="stFileUploader"] section { border: 1px dashed #b9c0cc; border-radius: 14px; background: #fafbfc; }
         div.stButton > button { border-radius: 12px; height: 3rem; font-weight: 700; }
-        .small-note { color: #586174; font-size: 0.92rem; }
+        .small-note { color: #586174; font-size: 0.92rem; line-height: 1.45; }
+        .scope-box { background:#fafbfc; border:1px solid #e3e7ee; border-radius:14px; padding:14px 16px; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -739,11 +823,13 @@ st.markdown(
 
 st.title("SAP ↔ Tourenplanung")
 st.markdown(
-    """
-    <div class="small-note">
-    Prüft immer beide Richtungen: <b>Tourenplanung → SAP</b> und <b>SAP → Tourenplanung</b>.
-    In der Tourenplanung werden nur die vier Blätter <b>DIREKT</b>, <b>MK</b>, <b>HUPA_NMS</b> und <b>HUPA_MALCHOW</b> gelesen.
-    Es gibt keine fest hinterlegte Kundenliste mehr.
+    f"""
+    <div class="scope-box">
+    <b>Prüfumfang</b><br>
+    Geprüft werden nur <b>NMS</b> und <b>Malchow</b> komplett sowie aus <b>Direkt</b> nur die Tournummern
+    <b>{', '.join(sorted(DIRECT_TOURS))}</b>.<br>
+    Die Auswertung zeigt immer beide Richtungen: <b>Fehlt in SAP / zu viel in Tour</b> und
+    <b>Fehlt in Tour / zu viel in SAP</b>. Die <b>Tournummer</b> wird in jeder Ergebniszeile ausgegeben.
     </div>
     """,
     unsafe_allow_html=True,
@@ -763,7 +849,7 @@ with upload_left:
 with upload_right:
     tourenplanung_datei = st.file_uploader(
         "Tourenplanung",
-        help="Geprüft werden: DIREKT, MK, HUPA_NMS und HUPA_MALCHOW. Erwartet: SAP, Name, Straße, Ort, Mo bis Sam.",
+        help="Geprüft werden: NMS, Malchow und Direkt mit den Tournummern 1058, 2058, 3058, 4058, 5058, 6030.",
         type=["xlsx", "xlsm", "xls"],
         key="tourenplanung_datei",
     )
@@ -783,11 +869,11 @@ if run:
             st.warning("In der SAP-Datei wurden keine gültigen Liefertage erkannt.")
         if tour_df.empty:
             st.warning(
-                "In der Tourenplanung wurden keine gesetzten Liefertage erkannt. "
-                f"Geprüfte Blätter: {', '.join(tour_sheets)}."
+                "In der Tourenplanung wurden keine passenden Liefertage erkannt. "
+                "Bitte prüfen, ob die Blätter NMS, Malchow und Direkt vorhanden sind und ob Direkt die gewünschten Tournummern enthält."
             )
         if missing_tour_sheets:
-            st.warning("Nicht alle erwarteten Blätter wurden gefunden: " + ", ".join(missing_tour_sheets))
+            st.warning("Nicht alle erwarteten Bereiche wurden gefunden: " + ", ".join(missing_tour_sheets))
 
         missing_sap = build_missing_in_sap(tour_df, days_by_sap, customer_info)
         missing_tour = build_missing_in_tour(tour_df, days_by_sap, customer_info)
@@ -804,6 +890,7 @@ if run:
             "tour_sheets": tour_sheets,
             "tour_rows": len(tour_df),
             "all_count": all_count,
+            "tour_df": tour_df,
         }
     except Exception as exc:
         import traceback
@@ -822,6 +909,7 @@ result = st.session_state.get("result")
 if result:
     missing_sap = result["missing_sap"]
     missing_tour = result["missing_tour"]
+    tour_df = result["tour_df"]
 
     st.divider()
 
@@ -830,13 +918,17 @@ if result:
         st.subheader("Ergebnis")
         st.caption(
             f"SAP: Blatt {result['sap_sheet']}, {result['sap_rows']} Liefertage übernommen · "
-            f"Tourenplanung: {', '.join(result['tour_sheets'])}, {result.get('tour_rows', 0)} gesetzte Liefertage erkannt"
+            f"Tourenplanung: {', '.join(result['tour_sheets'])}, {result.get('tour_rows', 0)} passende Tour-Liefertage erkannt"
+        )
+        st.caption(
+            "Hinweis: Für 'Fehlt in Tour' werden nur SAP-Nummern geprüft, die im ausgewählten Tourbereich vorkommen. "
+            "So werden keine fremden Bereiche aus der SAP-Datei als Fehler ausgegeben."
         )
     with head_right:
         st.download_button(
             label="Excel herunterladen",
             data=result["excel_bytes"],
-            file_name="sap_tourenplanung_alle_unterschiede.xlsx",
+            file_name="sap_tourenplanung_nms_malchow_direkt_1058_unterschiede.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
         )
@@ -854,7 +946,7 @@ if result:
     ])
 
     with tabs[0]:
-        overview = build_overview(missing_sap, missing_tour)
+        overview = build_overview(missing_sap, missing_tour, tour_df)
         st.dataframe(overview, use_container_width=True, hide_index=True)
 
         if result["all_count"] == 0:
@@ -862,12 +954,12 @@ if result:
 
     combined_parts = []
     if not missing_sap.empty:
-        part = _add_count_column(missing_sap).copy()
-        part.insert(0, "Prüfung", "Fehlt in SAP")
+        part = missing_sap.copy()
+        part.insert(0, "Prüfung", "Fehlt in SAP / zu viel in Tour")
         combined_parts.append(part)
     if not missing_tour.empty:
-        part = _add_count_column(missing_tour).copy()
-        part.insert(0, "Prüfung", "Fehlt in Tour")
+        part = missing_tour.copy()
+        part.insert(0, "Prüfung", "Fehlt in Tour / zu viel in SAP")
         combined_parts.append(part)
     combined = pd.concat(combined_parts, ignore_index=True) if combined_parts else pd.DataFrame()
 
@@ -875,8 +967,10 @@ if result:
         if combined.empty:
             st.info("Keine Treffer.")
         else:
-            suche = st.text_input("Suchen", key="filter_all_suche", placeholder="SAP Nummer, Name, Straße, Ort oder Blatt")
-            filtered = _filter_dataframe(combined, suche)
+            f1, f2 = st.columns([1, 2])
+            bereich = f1.selectbox("Bereich", ["Alle", "NMS", "Malchow", "Direkt"], key="filter_all_bereich")
+            suche = f2.text_input("Suchen", key="filter_all_suche", placeholder="Tournummer, SAP Nummer, Name, Straße, Ort oder Liefertag")
+            filtered = _filter_dataframe(combined, suche, bereich)
             st.caption(f"{len(filtered)} von {len(combined)} Zeilen")
             st.dataframe(filtered, use_container_width=True, hide_index=True)
 
@@ -885,19 +979,19 @@ if result:
             st.info("Keine Treffer: Es gibt keine Tage in der Tourenplanung, die in SAP fehlen.")
         else:
             f1, f2 = st.columns([1, 2])
-            blatt = f1.selectbox("Blatt", ["Alle"] + TOUR_SHEET_CANDIDATES, key="filter_sap_blatt")
-            suche = f2.text_input("Suchen", key="filter_sap_suche", placeholder="SAP Nummer, Name, Straße oder Ort")
-            filtered = _add_count_column(_filter_dataframe(missing_sap, suche, blatt))
+            bereich = f1.selectbox("Bereich", ["Alle", "NMS", "Malchow", "Direkt"], key="filter_sap_bereich")
+            suche = f2.text_input("Suchen", key="filter_sap_suche", placeholder="Tournummer, SAP Nummer, Name, Straße, Ort oder Liefertag")
+            filtered = _filter_dataframe(missing_sap, suche, bereich)
             st.caption(f"{len(filtered)} von {len(missing_sap)} Zeilen")
             st.dataframe(filtered, use_container_width=True, hide_index=True)
 
     with tabs[3]:
         if missing_tour.empty:
-            st.info("Keine Treffer: Es gibt keine Tage in SAP, die in der Tourenplanung fehlen.")
+            st.info("Keine Treffer: Es gibt keine Tage in SAP, die im ausgewählten Tourbereich fehlen.")
         else:
             f1, f2 = st.columns([1, 2])
-            blatt = f1.selectbox("Blatt", ["Alle"] + TOUR_SHEET_CANDIDATES + ["nicht in Tourenplanung"], key="filter_tour_blatt")
-            suche = f2.text_input("Suchen", key="filter_tour_suche", placeholder="SAP Nummer, Name, Straße oder Ort")
-            filtered = _add_count_column(_filter_dataframe(missing_tour, suche, blatt))
+            bereich = f1.selectbox("Bereich", ["Alle", "NMS", "Malchow", "Direkt"], key="filter_tour_bereich")
+            suche = f2.text_input("Suchen", key="filter_tour_suche", placeholder="Tournummer, SAP Nummer, Name, Straße, Ort oder Liefertag")
+            filtered = _filter_dataframe(missing_tour, suche, bereich)
             st.caption(f"{len(filtered)} von {len(missing_tour)} Zeilen")
             st.dataframe(filtered, use_container_width=True, hide_index=True)
