@@ -230,12 +230,9 @@ def result_columns() -> List[str]:
         "CSB",
         "SAP Nummer",
         "Name",
-        "Straße",
-        "PLZ",
         "Ort",
-        "Tourendatei Soll",
-        "SAP Ist",
-        "Abweichung",
+        "Liefertage Tour",
+        "Fehlt in SAP",
     ]
 
 
@@ -402,7 +399,11 @@ def build_differences(
     sap_days_by_customer: Dict[str, Set[int]],
     sap_customers: Set[str],
 ) -> pd.DataFrame:
-    """Tourendatei ist Soll. SAP wird ausschließlich dagegen geprüft."""
+    """Prüft ausschließlich: Sind alle Liefertage aus der Tourendatei in SAP vorhanden?
+
+    Zusätzliche Liefertage in SAP werden bewusst ignoriert.
+    Fehlt ein Kunde komplett in SAP, gelten seine Tour-Liefertage als fehlend.
+    """
     if tour_customers.empty:
         return pd.DataFrame(columns=result_columns())
 
@@ -411,38 +412,20 @@ def build_differences(
     for _, row in tour_customers.iterrows():
         sap = str(row["SAP Nummer"])
         tour_days = set(row["_tour_days"])
+        sap_days = set(sap_days_by_customer.get(sap, set())) if sap in sap_customers else set()
 
-        if sap not in sap_customers:
-            sap_days: Set[int] = set()
-            abweichung = "Kunde fehlt in SAP"
-        else:
-            sap_days = set(sap_days_by_customer.get(sap, set()))
-            missing_in_sap = tour_days - sap_days
-            extra_in_sap = sap_days - tour_days
-
-            if not missing_in_sap and not extra_in_sap:
-                continue
-
-            parts: List[str] = []
-            if missing_in_sap:
-                parts.append(f"Fehlt in SAP: {days_text(missing_in_sap)}")
-            if extra_in_sap:
-                parts.append(f"Zusätzlich in SAP: {days_text(extra_in_sap)}")
-            if not parts:
-                parts.append("Liefertage weichen ab")
-            abweichung = " · ".join(parts)
+        missing_in_sap = tour_days - sap_days
+        if not missing_in_sap:
+            continue
 
         rows.append({
             "Bereich": row.get("Bereich", ""),
             "CSB": row.get("CSB", ""),
             "SAP Nummer": sap,
             "Name": row.get("Name", ""),
-            "Straße": row.get("Straße", ""),
-            "PLZ": row.get("PLZ", ""),
             "Ort": row.get("Ort", ""),
-            "Tourendatei Soll": days_text(tour_days),
-            "SAP Ist": days_text(sap_days) if sap in sap_customers else "–",
-            "Abweichung": abweichung,
+            "Liefertage Tour": days_text(tour_days),
+            "Fehlt in SAP": days_text(missing_in_sap),
         })
 
     if not rows:
@@ -463,8 +446,8 @@ def build_differences(
 def build_excel(differences: pd.DataFrame) -> bytes:
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        differences.to_excel(writer, index=False, sheet_name="Abweichungen", na_rep="")
-        ws = writer.sheets["Abweichungen"]
+        differences.to_excel(writer, index=False, sheet_name="Fehlende Liefertage", na_rep="")
+        ws = writer.sheets["Fehlende Liefertage"]
 
         header_fill = PatternFill(start_color="FF374151", end_color="FF374151", fill_type="solid")
         missing_fill = PatternFill(start_color="FFFEE2E2", end_color="FFFEE2E2", fill_type="solid")
@@ -484,13 +467,11 @@ def build_excel(differences: pd.DataFrame) -> bytes:
         ws.row_dimensions[1].height = 24
 
         for row_idx in range(2, len(differences) + 2):
-            abweichung = str(ws.cell(row=row_idx, column=columns.index("Abweichung") + 1).value or "")
-            row_fill = missing_fill if "Kunde fehlt in SAP" in abweichung else diff_fill
             for col_idx in range(1, len(columns) + 1):
                 cell = ws.cell(row=row_idx, column=col_idx)
                 cell.font = body_font
                 cell.border = border
-                cell.fill = row_fill
+                cell.fill = diff_fill
                 cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=False)
             ws.row_dimensions[row_idx].height = 20
 
@@ -499,12 +480,9 @@ def build_excel(differences: pd.DataFrame) -> bytes:
             "CSB": 11,
             "SAP Nummer": 13,
             "Name": 34,
-            "Straße": 30,
-            "PLZ": 9,
             "Ort": 25,
-            "Tourendatei Soll": 22,
-            "SAP Ist": 22,
-            "Abweichung": 46,
+            "Liefertage Tour": 22,
+            "Fehlt in SAP": 22,
         }
         for col_idx, col_name in enumerate(columns, start=1):
             width = width_hints.get(col_name, 20)
@@ -537,10 +515,9 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.title("Tourendatei → SAP")
+st.title("Liefertage Tour → SAP")
 st.caption(
-    "Die Tourendatei ist der Soll-Stand. Geprüft wird nur, ob diese Kunden in SAP vorhanden sind "
-    "und ob ihre Liefertage dort genauso hinterlegt sind."
+    "Die Tourendatei ist die Vorgabe. Geprüft wird ausschließlich, ob jeder dort eingetragene Liefertag auch in SAP vorhanden ist."
 )
 
 with st.container(border=True):
@@ -548,7 +525,7 @@ with st.container(border=True):
     st.write(
         "NMS komplett · Malchow komplett · Direkt nur Touren "
         "1058, 2058, 3058, 4058, 5058 und 6030. "
-        "Kunden, die nur in SAP stehen, werden nicht geprüft."
+        "Zusätzliche Liefertage in SAP werden ignoriert."
     )
 
 col1, col2 = st.columns(2)
@@ -567,7 +544,7 @@ with col2:
         help="NMS und Malchow komplett; Direkt nur die sechs festgelegten Touren.",
     )
 
-run = st.button("Abgleich starten", type="primary", use_container_width=True)
+run = st.button("Liefertage prüfen", type="primary", use_container_width=True)
 
 if run:
     if not sap_datei or not tour_datei:
@@ -580,17 +557,12 @@ if run:
         differences = build_differences(tour_customers, sap_days, sap_customers)
         excel_bytes = build_excel(differences)
 
-        missing_customer_count = int(differences["Abweichung"].eq("Kunde fehlt in SAP").sum()) if not differences.empty else 0
-        day_diff_count = len(differences) - missing_customer_count
-
         st.session_state["tour_sap_result"] = {
             "sap_sheet": sap_sheet,
-            "sap_customer_count": sap_customer_count,
             "selected_sheets": selected_sheets,
             "tour_customer_count": len(tour_customers),
             "differences": differences,
-            "missing_customer_count": missing_customer_count,
-            "day_diff_count": day_diff_count,
+            "customers_with_missing_days": len(differences),
             "excel_bytes": excel_bytes,
         }
     except Exception as exc:
@@ -615,21 +587,20 @@ if result:
         st.download_button(
             "Excel herunterladen",
             data=result["excel_bytes"],
-            file_name="Tourendatei_gegen_SAP_Abweichungen.xlsx",
+            file_name="Fehlende_Liefertage_in_SAP.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
         )
 
-    c1, c2, c3 = st.columns(3)
+    c1, c2 = st.columns(2)
     c1.metric("Geprüfte Tour-Kunden", result["tour_customer_count"])
-    c2.metric("Kunden fehlen in SAP", result["missing_customer_count"])
-    c3.metric("Liefertage abweichend", result["day_diff_count"])
+    c2.metric("Kunden mit fehlendem Liefertag in SAP", result["customers_with_missing_days"])
 
     differences = result["differences"]
     if differences.empty:
-        st.success("Alle geprüften Kunden aus der Tourendatei sind in SAP vorhanden und die Liefertage stimmen überein.")
+        st.success("Alle Liefertage aus der Tourendatei sind in SAP vorhanden.")
     else:
-        st.markdown("### Abweichungen")
+        st.markdown("### Fehlende Liefertage in SAP")
         st.dataframe(
             differences,
             use_container_width=True,
@@ -637,6 +608,5 @@ if result:
             column_config={
                 "SAP Nummer": st.column_config.TextColumn("SAP Nummer"),
                 "CSB": st.column_config.TextColumn("CSB"),
-                "PLZ": st.column_config.TextColumn("PLZ"),
             },
         )
