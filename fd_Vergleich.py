@@ -588,7 +588,7 @@ def build_html_report(
     status_text = (
         "Alle Liefertage aus der Tourendatei sind in SAP vorhanden."
         if diff_count == 0
-        else "Die vollständige Kundenübersicht zeigt Tour und SAP direkt nebeneinander. Fehlende Tour-Liefertage sind rot markiert."
+        else "Die vollständige Kundenübersicht zeigt Tour und SAP direkt nebeneinander. Fehlende Tour-Liefertage sind rot markiert; zusätzliche SAP-Tage werden orange mit einem + hervorgehoben."
     )
 
     sheet_parts = []
@@ -613,7 +613,11 @@ def build_html_report(
                 cls += " day-sap"
             else:
                 cls += " day-tour"
-            parts.append(f"<span class='{cls}'>{DAY_SHORT.get(d, str(d))}</span>")
+            label = DAY_SHORT.get(d, str(d))
+            if d in extra:
+                parts.append(f"<span class='{cls}' title='Zusätzlich in SAP'>+{label}</span>")
+            else:
+                parts.append(f"<span class='{cls}'>{label}</span>")
         return "".join(parts)
 
     rows = []
@@ -677,7 +681,7 @@ def build_html_report(
     --bg:#f5f6f8; --card:#fff; --text:#172033; --muted:#687386; --line:#e4e7ec;
     --accent:#6d55c7; --accent-dark:#5842ad; --tour:#6d55c7; --tour-bg:#f0edfb;
     --sap:#157347; --sap-bg:#eaf7f0; --warn:#9a5a00; --warn-bg:#fff6df;
-    --bad:#b42318; --bad-bg:#fff0ee; --gray-bg:#f1f3f5;
+    --bad:#b42318; --bad-bg:#fff0ee; --extra:#9a4f00; --extra-bg:#fff0d6; --extra-border:#f59e0b; --gray-bg:#f1f3f5;
 }}
 * {{ box-sizing:border-box; }}
 body {{ margin:0; background:var(--bg); color:var(--text); font-family:Inter,Segoe UI,Arial,sans-serif; }}
@@ -705,7 +709,7 @@ h1 {{ margin:0 0 8px; font-size:clamp(28px,4vw,42px); letter-spacing:-.03em; }}
 .legend {{ display:flex; flex-wrap:wrap; gap:8px; align-items:center; color:var(--muted); font-size:12px; }}
 .legend-item {{ display:inline-flex; align-items:center; gap:5px; }}
 .legend-dot {{ width:10px; height:10px; border-radius:50%; display:inline-block; }}
-.legend-tour {{ background:var(--tour); }} .legend-sap {{ background:var(--sap); }} .legend-missing {{ background:var(--bad); }}
+.legend-tour {{ background:var(--tour); }} .legend-sap {{ background:var(--sap); }} .legend-missing {{ background:var(--bad); }} .legend-extra {{ background:var(--extra-border); box-shadow:0 0 0 2px #ffe2ad inset; }}
 .toolbar {{ display:flex; justify-content:space-between; align-items:center; gap:12px; margin:12px 0 10px; flex-wrap:wrap; }}
 .search {{ flex:1 1 420px; max-width:620px; border:1px solid var(--line); background:#fff; border-radius:12px; padding:12px 14px; font-size:14px; outline:none; }}
 .search:focus {{ border-color:#a99be0; box-shadow:0 0 0 3px #eeeafc; }}
@@ -730,7 +734,7 @@ tbody tr:hover td {{ background:#faf9fe; }}
 .day-tour {{ background:var(--tour-bg); color:#4d3a9b; border-color:#d9d1f4; }}
 .day-sap {{ background:var(--sap-bg); color:var(--sap); border-color:#b7e2c9; }}
 .day-missing {{ background:var(--bad-bg); color:var(--bad); border-color:#f5bbb5; }}
-.day-extra {{ background:var(--gray-bg); color:#5d6675; border-color:#d7dce2; }}
+.day-extra {{ background:var(--extra-bg); color:var(--extra); border:2px solid var(--extra-border); box-shadow:0 0 0 2px rgba(245,158,11,.10); font-weight:950; }}
 .none {{ color:#a0a7b2; }}
 .status-badge {{ display:inline-flex; align-items:center; border-radius:999px; padding:6px 9px; font-size:11px; font-weight:850; white-space:nowrap; }}
 .badge-ok {{ background:var(--sap-bg); color:var(--sap); }}
@@ -772,7 +776,7 @@ tbody tr:hover td {{ background:#faf9fe; }}
         <div class="metric-label">Geprüfte Datenbasis</div>
         <div><b>SAP-Blatt:</b> {html.escape(str(sap_sheet))}</div>
         <div class="info">{sheets_html}</div>
-        <div class="rules">NMS komplett · Malchow komplett · Direkt nur Touren 1058, 2058, 3058, 4058, 5058 und 6030. Zusätzliche Liefertage in SAP werden weiterhin nicht als Fehler gewertet, sind in der SAP-Spalte aber sichtbar.</div>
+        <div class="rules">NMS komplett · Malchow komplett · Direkt nur Touren 1058, 2058, 3058, 4058, 5058 und 6030. Zusätzliche Liefertage in SAP werden weiterhin nicht als Fehler gewertet. In der SAP-Spalte sind sie deutlich <b>orange mit +</b> markiert.</div>
     </div>
 
     <div class="section-head">
@@ -781,6 +785,7 @@ tbody tr:hover td {{ background:#faf9fe; }}
             <span class="legend-item"><i class="legend-dot legend-tour"></i> Tour</span>
             <span class="legend-item"><i class="legend-dot legend-sap"></i> SAP</span>
             <span class="legend-item"><i class="legend-dot legend-missing"></i> fehlt in SAP</span>
+            <span class="legend-item"><i class="legend-dot legend-extra"></i> + zusätzlich in SAP</span>
         </div>
     </div>
 
