@@ -1,3 +1,5 @@
+import base64
+import html
 import io
 import re
 from typing import Dict, List, Optional, Set, Tuple
@@ -497,6 +499,231 @@ def build_excel(differences: pd.DataFrame) -> bytes:
     return output.getvalue()
 
 
+
+# ---------------------------------------------------------------------------
+# HTML-Ausgabe: eigenständiger Bericht inkl. eingebettetem Excel-Download
+# ---------------------------------------------------------------------------
+
+def build_html_report(
+    differences: pd.DataFrame,
+    tour_customer_count: int,
+    sap_sheet: str,
+    selected_sheets: Dict[str, str],
+    excel_bytes: bytes,
+) -> bytes:
+    """Erzeugt eine portable HTML-Auswertung.
+
+    Die Excel-Auswertung wird als Base64 direkt in die HTML-Datei eingebettet.
+    Dadurch kann die HTML-Datei lokal geöffnet und die Excel-Datei ohne
+    weitere Serververbindung über den Download-Button gespeichert werden.
+    """
+    excel_b64 = base64.b64encode(excel_bytes).decode("ascii")
+    diff_count = len(differences)
+    ok_count = max(tour_customer_count - diff_count, 0)
+
+    status_class = "success" if diff_count == 0 else "warning"
+    status_title = "Keine Abweichungen gefunden" if diff_count == 0 else f"{diff_count} Kunde(n) mit Abweichung"
+    status_text = (
+        "Alle Liefertage aus der Tourendatei sind in SAP vorhanden."
+        if diff_count == 0
+        else "Bei diesen Kunden fehlt mindestens ein Liefertag aus der Tourendatei in SAP."
+    )
+
+    sheet_parts = []
+    for bereich in ["NMS", "Malchow", "Direkt"]:
+        if bereich in selected_sheets:
+            sheet_parts.append(f"<span class='chip'><b>{html.escape(bereich)}</b>: {html.escape(str(selected_sheets[bereich]))}</span>")
+    sheets_html = "".join(sheet_parts) or "<span class='chip'>Keine relevanten Tourenblätter erkannt</span>"
+
+    if differences.empty:
+        table_html = """
+        <div class="empty-state">
+            <div class="empty-icon">✓</div>
+            <h3>Alles in Ordnung</h3>
+            <p>Es wurden keine fehlenden Liefertage in SAP gefunden.</p>
+        </div>
+        """
+        search_html = ""
+    else:
+        rows = []
+        for _, row in differences.iterrows():
+            rows.append(
+                "<tr>"
+                f"<td><span class='area'>{html.escape(str(row.get('Bereich', '')))}</span></td>"
+                f"<td>{html.escape(str(row.get('CSB', '')))}</td>"
+                f"<td class='mono'>{html.escape(str(row.get('SAP Nummer', '')))}</td>"
+                f"<td class='name'>{html.escape(str(row.get('Name', '')))}</td>"
+                f"<td>{html.escape(str(row.get('Ort', '')))}</td>"
+                f"<td>{html.escape(str(row.get('Liefertage Tour', '')))}</td>"
+                f"<td><span class='missing'>{html.escape(str(row.get('Fehlt in SAP', '')))}</span></td>"
+                "</tr>"
+            )
+        search_html = """
+        <div class="toolbar">
+            <input id="searchInput" type="search" placeholder="Kunde, SAP, CSB, Ort oder Liefertag suchen …" oninput="filterTable()">
+            <span id="resultCount"></span>
+        </div>
+        """
+        table_html = f"""
+        <div class="table-wrap">
+            <table id="resultTable">
+                <thead>
+                    <tr>
+                        <th>Bereich</th>
+                        <th>CSB</th>
+                        <th>SAP Nummer</th>
+                        <th>Name</th>
+                        <th>Ort</th>
+                        <th>Liefertage Tour</th>
+                        <th>Fehlt in SAP</th>
+                    </tr>
+                </thead>
+                <tbody>{''.join(rows)}</tbody>
+            </table>
+        </div>
+        """
+
+    report = f"""<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Liefertage Tour → SAP</title>
+<style>
+:root {{
+    --bg: #f5f6f8;
+    --card: #ffffff;
+    --text: #172033;
+    --muted: #687386;
+    --line: #e4e7ec;
+    --accent: #6d55c7;
+    --accent-dark: #5842ad;
+    --good: #157347;
+    --good-bg: #eaf7f0;
+    --warn: #9a5a00;
+    --warn-bg: #fff6df;
+    --bad: #b42318;
+    --bad-bg: #fff0ee;
+}}
+* {{ box-sizing: border-box; }}
+body {{ margin: 0; background: var(--bg); color: var(--text); font-family: Inter, Segoe UI, Arial, sans-serif; }}
+.page {{ max-width: 1380px; margin: 0 auto; padding: 34px 24px 48px; }}
+.header {{ display: flex; justify-content: space-between; gap: 24px; align-items: flex-start; margin-bottom: 24px; }}
+.eyebrow {{ color: var(--accent); font-weight: 800; font-size: 12px; letter-spacing: .08em; text-transform: uppercase; margin-bottom: 8px; }}
+h1 {{ margin: 0 0 8px; font-size: clamp(28px, 4vw, 42px); letter-spacing: -.03em; }}
+.subtitle {{ color: var(--muted); font-size: 16px; max-width: 850px; line-height: 1.5; }}
+.download {{ display: inline-flex; align-items: center; justify-content: center; min-height: 48px; padding: 0 18px; border-radius: 12px; background: var(--accent); color: white; font-weight: 800; text-decoration: none; box-shadow: 0 8px 20px rgba(70, 50, 140, .16); white-space: nowrap; }}
+.download:hover {{ background: var(--accent-dark); }}
+.grid {{ display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin: 20px 0; }}
+.card {{ background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 20px; box-shadow: 0 3px 12px rgba(20, 30, 50, .04); }}
+.metric-label {{ color: var(--muted); font-size: 13px; font-weight: 700; margin-bottom: 8px; }}
+.metric-value {{ font-size: 34px; font-weight: 850; letter-spacing: -.04em; }}
+.metric-note {{ color: var(--muted); font-size: 13px; margin-top: 6px; }}
+.status {{ border-radius: 14px; padding: 16px 18px; margin: 18px 0; border: 1px solid; }}
+.status.success {{ background: var(--good-bg); border-color: #b7e2c9; color: var(--good); }}
+.status.warning {{ background: var(--warn-bg); border-color: #f0d391; color: var(--warn); }}
+.status strong {{ display: block; font-size: 16px; margin-bottom: 3px; }}
+.section-title {{ margin: 28px 0 12px; font-size: 20px; }}
+.info {{ display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }}
+.chip {{ background: #f1effa; color: #443589; border-radius: 999px; padding: 7px 11px; font-size: 12px; }}
+.rules {{ color: var(--muted); font-size: 14px; line-height: 1.55; margin-top: 10px; }}
+.toolbar {{ display: flex; justify-content: space-between; align-items: center; gap: 14px; margin: 14px 0 10px; }}
+#searchInput {{ width: min(520px, 100%); border: 1px solid var(--line); background: white; border-radius: 12px; padding: 12px 14px; font-size: 14px; outline: none; }}
+#searchInput:focus {{ border-color: #a99be0; box-shadow: 0 0 0 3px #eeeafc; }}
+#resultCount {{ color: var(--muted); font-size: 13px; font-weight: 700; }}
+.table-wrap {{ overflow-x: auto; background: var(--card); border: 1px solid var(--line); border-radius: 16px; box-shadow: 0 3px 12px rgba(20, 30, 50, .04); }}
+table {{ width: 100%; border-collapse: collapse; min-width: 980px; }}
+th {{ position: sticky; top: 0; background: #252a36; color: #fff; text-align: left; font-size: 12px; letter-spacing: .02em; padding: 13px 14px; }}
+td {{ padding: 12px 14px; border-top: 1px solid var(--line); font-size: 13px; vertical-align: middle; }}
+tbody tr:hover {{ background: #faf9fe; }}
+.name {{ font-weight: 700; }}
+.mono {{ font-variant-numeric: tabular-nums; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }}
+.area {{ display: inline-block; background: #f0f2f5; border-radius: 999px; padding: 5px 9px; font-weight: 750; }}
+.missing {{ display: inline-block; background: var(--bad-bg); color: var(--bad); border: 1px solid #fac7c2; border-radius: 8px; padding: 5px 8px; font-weight: 800; }}
+.empty-state {{ background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 48px 24px; text-align: center; }}
+.empty-icon {{ width: 52px; height: 52px; margin: 0 auto 12px; display: grid; place-items: center; border-radius: 50%; background: var(--good-bg); color: var(--good); font-size: 28px; font-weight: 900; }}
+.empty-state h3 {{ margin: 0 0 6px; }}
+.empty-state p {{ margin: 0; color: var(--muted); }}
+.footer {{ color: var(--muted); font-size: 12px; margin-top: 26px; text-align: center; }}
+@media (max-width: 820px) {{
+    .page {{ padding: 22px 14px 36px; }}
+    .header {{ flex-direction: column; }}
+    .download {{ width: 100%; }}
+    .grid {{ grid-template-columns: 1fr; }}
+    .toolbar {{ flex-direction: column; align-items: stretch; }}
+    #searchInput {{ width: 100%; }}
+}}
+</style>
+</head>
+<body>
+<div class="page">
+    <div class="header">
+        <div>
+            <div class="eyebrow">Tourenplanung · SAP-Abgleich</div>
+            <h1>Liefertage Tour → SAP</h1>
+            <div class="subtitle">Die Tourendatei ist die Vorgabe. Geprüft wird ausschließlich, ob jeder dort eingetragene Liefertag auch in SAP vorhanden ist.</div>
+        </div>
+        <a class="download" href="data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,{excel_b64}" download="Fehlende_Liefertage_in_SAP.xlsx">Excel herunterladen</a>
+    </div>
+
+    <div class="grid">
+        <div class="card">
+            <div class="metric-label">Geprüfte Tour-Kunden</div>
+            <div class="metric-value">{tour_customer_count}</div>
+            <div class="metric-note">relevante Kunden aus der Tourendatei</div>
+        </div>
+        <div class="card">
+            <div class="metric-label">Ohne Abweichung</div>
+            <div class="metric-value">{ok_count}</div>
+            <div class="metric-note">Liefertage vollständig in SAP vorhanden</div>
+        </div>
+        <div class="card">
+            <div class="metric-label">Mit fehlendem Liefertag</div>
+            <div class="metric-value">{diff_count}</div>
+            <div class="metric-note">Kunden in der Fehlerliste</div>
+        </div>
+    </div>
+
+    <div class="status {status_class}">
+        <strong>{html.escape(status_title)}</strong>
+        {html.escape(status_text)}
+    </div>
+
+    <div class="card">
+        <div class="metric-label">Geprüfte Datenbasis</div>
+        <div><b>SAP-Blatt:</b> {html.escape(str(sap_sheet))}</div>
+        <div class="info">{sheets_html}</div>
+        <div class="rules">NMS komplett · Malchow komplett · Direkt nur Touren 1058, 2058, 3058, 4058, 5058 und 6030. Zusätzliche Liefertage in SAP werden bewusst ignoriert.</div>
+    </div>
+
+    <h2 class="section-title">Fehlende Liefertage in SAP</h2>
+    {search_html}
+    {table_html}
+
+    <div class="footer">Erstellt mit der Auswertung „Liefertage Tour → SAP“</div>
+</div>
+<script>
+function filterTable() {{
+    const input = document.getElementById('searchInput');
+    const table = document.getElementById('resultTable');
+    const count = document.getElementById('resultCount');
+    if (!input || !table) return;
+    const term = input.value.toLowerCase().trim();
+    let visible = 0;
+    for (const row of table.tBodies[0].rows) {{
+        const show = row.innerText.toLowerCase().includes(term);
+        row.style.display = show ? '' : 'none';
+        if (show) visible++;
+    }}
+    if (count) count.textContent = visible + ' Treffer';
+}}
+filterTable();
+</script>
+</body>
+</html>"""
+    return report.encode("utf-8")
+
+
 # ---------------------------------------------------------------------------
 # Streamlit UI
 # ---------------------------------------------------------------------------
@@ -556,6 +783,13 @@ if run:
         tour_customers, selected_sheets = read_tour_customers(tour_datei)
         differences = build_differences(tour_customers, sap_days, sap_customers)
         excel_bytes = build_excel(differences)
+        html_bytes = build_html_report(
+            differences=differences,
+            tour_customer_count=len(tour_customers),
+            sap_sheet=sap_sheet,
+            selected_sheets=selected_sheets,
+            excel_bytes=excel_bytes,
+        )
 
         st.session_state["tour_sap_result"] = {
             "sap_sheet": sap_sheet,
@@ -564,6 +798,7 @@ if run:
             "differences": differences,
             "customers_with_missing_days": len(differences),
             "excel_bytes": excel_bytes,
+            "html_bytes": html_bytes,
         }
     except Exception as exc:
         import traceback
@@ -576,12 +811,21 @@ result = st.session_state.get("tour_sap_result")
 if result:
     st.divider()
 
-    top_left, top_right = st.columns([3, 1])
+    top_left, top_mid, top_right = st.columns([3, 1, 1])
     with top_left:
         st.subheader("Ergebnis")
         st.caption(
             f"{result['tour_customer_count']} relevante Tour-Kunden geprüft · "
             f"SAP-Blatt: {result['sap_sheet']}"
+        )
+    with top_mid:
+        st.download_button(
+            "HTML-Auswertung",
+            data=result["html_bytes"],
+            file_name="Tour_SAP_Auswertung.html",
+            mime="text/html",
+            use_container_width=True,
+            type="primary",
         )
     with top_right:
         st.download_button(
