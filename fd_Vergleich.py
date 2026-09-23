@@ -671,7 +671,7 @@ def build_html_report(
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Tour ↔ SAP Gesamtübersicht</title>
+<title>FD SAP – Quelldatei Abgleich</title>
 <style>
 :root {{
     --bg:#f5f6f8; --card:#fff; --text:#172033; --muted:#687386; --line:#e4e7ec;
@@ -713,17 +713,17 @@ h1 {{ margin:0 0 8px; font-size:clamp(28px,4vw,42px); letter-spacing:-.03em; }}
 .filter-btn {{ border:1px solid var(--line); background:#fff; color:var(--text); border-radius:999px; padding:9px 13px; font-weight:750; cursor:pointer; }}
 .filter-btn.active {{ background:#272b35; border-color:#272b35; color:#fff; }}
 .result-count {{ color:var(--muted); font-size:13px; font-weight:700; min-width:86px; text-align:right; }}
-.table-wrap {{ overflow:auto; max-height:72vh; background:var(--card); border:1px solid var(--line); border-radius:16px; box-shadow:0 3px 12px rgba(20,30,50,.04); }}
-table {{ width:100%; border-collapse:separate; border-spacing:0; min-width:1260px; }}
+.table-wrap {{ overflow:visible; max-height:none; background:var(--card); border:1px solid var(--line); border-radius:16px; box-shadow:0 3px 12px rgba(20,30,50,.04); }}
+table {{ width:100%; border-collapse:separate; border-spacing:0; table-layout:auto; }}
 th {{ position:sticky; top:0; z-index:2; background:#252a36; color:#fff; text-align:left; font-size:12px; letter-spacing:.02em; padding:13px 12px; }}
 th:first-child {{ border-top-left-radius:15px; }} th:last-child {{ border-top-right-radius:15px; }}
 th.tour-head {{ background:#53419c; }} th.sap-head {{ background:#176a47; }}
 td {{ padding:11px 12px; border-top:1px solid var(--line); font-size:13px; vertical-align:middle; background:#fff; }}
 tr.row-diff td {{ background:#fffcf5; }}
 tbody tr:hover td {{ background:#faf9fe; }}
-.name {{ font-weight:750; min-width:230px; }} .mono {{ font-variant-numeric:tabular-nums; font-family:ui-monospace,SFMono-Regular,Consolas,monospace; }}
+.name {{ font-weight:750; min-width:0; overflow-wrap:anywhere; }} .mono {{ font-variant-numeric:tabular-nums; font-family:ui-monospace,SFMono-Regular,Consolas,monospace; }}
 .area {{ display:inline-block; background:#f0f2f5; border-radius:999px; padding:5px 9px; font-weight:750; }}
-.days-cell {{ min-width:155px; }} .days {{ display:flex; gap:5px; flex-wrap:wrap; align-items:center; }}
+.days-cell {{ min-width:0; }} .days {{ display:flex; gap:5px; flex-wrap:wrap; align-items:center; }}
 .source-label {{ font-size:9px; font-weight:900; letter-spacing:.08em; margin-bottom:5px; }}
 .tour-label {{ color:var(--tour); }} .sap-label {{ color:var(--sap); }}
 .day {{ min-width:31px; height:27px; display:inline-flex; align-items:center; justify-content:center; border-radius:7px; font-weight:850; font-size:11px; border:1px solid transparent; }}
@@ -737,6 +737,11 @@ tbody tr:hover td {{ background:#faf9fe; }}
 .badge-diff {{ background:var(--warn-bg); color:var(--warn); }}
 .badge-missing {{ background:var(--bad-bg); color:var(--bad); }}
 .footer {{ color:var(--muted); font-size:12px; margin-top:24px; text-align:center; }}
+@media (max-width:1100px) {{
+    th, td {{ padding:9px 7px; font-size:11px; }}
+    .day {{ min-width:27px; height:25px; font-size:10px; }}
+    .status-badge {{ white-space:normal; text-align:center; }}
+}}
 @media (max-width:820px) {{
     .page {{ padding:20px 12px 34px; }} .header {{ flex-direction:column; }} .download {{ width:100%; }}
     .grid {{ grid-template-columns:1fr; }} .section-head {{ flex-direction:column; align-items:flex-start; }}
@@ -748,11 +753,11 @@ tbody tr:hover td {{ background:#faf9fe; }}
 <div class="page">
     <div class="header">
         <div>
-            <div class="eyebrow">Tourenplanung · SAP-Abgleich</div>
-            <h1>Tour ↔ SAP Gesamtübersicht</h1>
+            <div class="eyebrow">FD SAP · Quelldatei Abgleich</div>
+            <h1>FD SAP – Quelldatei Abgleich</h1>
             <div class="subtitle">Alle relevanten Kunden auf einen Blick. Die Liefertage aus der Tourendatei stehen direkt neben den in SAP gepflegten Liefertagen.</div>
         </div>
-        <a class="download" href="data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,{excel_b64}" download="Tour_SAP_Gesamtuebersicht.xlsx">Excel herunterladen</a>
+        <a class="download" href="data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,{excel_b64}" download="FD_SAP_Quelldatei_Abgleich.xlsx">Excel herunterladen</a>
     </div>
 
     <div class="grid">
@@ -790,7 +795,7 @@ tbody tr:hover td {{ background:#faf9fe; }}
     </div>
 
     {table_html}
-    <div class="footer">Erstellt mit der Auswertung „Tour ↔ SAP“</div>
+    <div class="footer">Erstellt mit „FD SAP – Quelldatei Abgleich“</div>
 </div>
 <script>
 let activeFilter = 'all';
@@ -827,7 +832,7 @@ applyFilters();
 # Streamlit UI
 # ---------------------------------------------------------------------------
 
-st.set_page_config(page_title="Tourendatei gegen SAP", layout="wide")
+st.set_page_config(page_title="FD SAP – Quelldatei Abgleich", layout="wide")
 
 st.markdown(
     """
@@ -841,7 +846,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.title("Liefertage Tour → SAP")
+st.title("FD SAP – Quelldatei Abgleich")
 st.caption(
     "Die Tourendatei ist die Vorgabe. Geprüft wird ausschließlich, ob jeder dort eingetragene Liefertag auch in SAP vorhanden ist."
 )
@@ -923,7 +928,7 @@ if result:
         st.download_button(
             "HTML-Auswertung",
             data=result["html_bytes"],
-            file_name="Tour_SAP_Auswertung.html",
+            file_name="FD_SAP_Quelldatei_Abgleich.html",
             mime="text/html",
             use_container_width=True,
             type="primary",
@@ -932,7 +937,7 @@ if result:
         st.download_button(
             "Excel herunterladen",
             data=result["excel_bytes"],
-            file_name="Tour_SAP_Gesamtuebersicht.xlsx",
+            file_name="FD_SAP_Quelldatei_Abgleich.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
         )
