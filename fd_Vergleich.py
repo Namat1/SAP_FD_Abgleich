@@ -1,6 +1,7 @@
 import base64
 import html
 import io
+import hashlib
 import re
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -224,6 +225,13 @@ def days_text(days: Set[int]) -> str:
     if not days:
         return "–"
     return ", ".join(DAY_SHORT[d] for d in sorted(days))
+
+
+def uploaded_file_fingerprint(uploaded_file) -> str:
+    """Eindeutiger Fingerabdruck des aktuell hochgeladenen Dateiinhalts."""
+    if uploaded_file is None:
+        return ""
+    return hashlib.sha256(uploaded_file.getvalue()).hexdigest()
 
 
 def result_columns() -> List[str]:
@@ -880,6 +888,25 @@ with col2:
         help="NMS und Malchow komplett; Direkt nur die sechs festgelegten Touren.",
     )
 
+# Ergebnisse immer fest an die aktuell hochgeladenen Dateien binden.
+# Streamlit behält Session-State auch nach einem Dateiwechsel. Ohne diese
+# Prüfung könnte deshalb noch eine Auswertung der vorherigen Dateien angezeigt werden.
+current_sap_fingerprint = uploaded_file_fingerprint(sap_datei)
+current_tour_fingerprint = uploaded_file_fingerprint(tour_datei)
+
+existing_result = st.session_state.get("tour_sap_result")
+if existing_result:
+    result_sap_fp = existing_result.get("sap_fingerprint", "")
+    result_tour_fp = existing_result.get("tour_fingerprint", "")
+    if (
+        result_sap_fp != current_sap_fingerprint
+        or result_tour_fp != current_tour_fingerprint
+    ):
+        st.session_state.pop("tour_sap_result", None)
+        existing_result = None
+        if sap_datei is not None or tour_datei is not None:
+            st.info("Eine SAP-Datei oder Tourendatei wurde geändert. Bitte die Liefertage neu prüfen.")
+
 run = st.button("Liefertage prüfen", type="primary", use_container_width=True)
 
 if run:
@@ -910,6 +937,8 @@ if run:
             "customers_with_missing_days": len(differences),
             "excel_bytes": excel_bytes,
             "html_bytes": html_bytes,
+            "sap_fingerprint": current_sap_fingerprint,
+            "tour_fingerprint": current_tour_fingerprint,
         }
     except Exception as exc:
         import traceback
